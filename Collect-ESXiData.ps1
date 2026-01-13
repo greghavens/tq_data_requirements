@@ -34,8 +34,7 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [ValidateScript({ Test-Path $_ -PathType Leaf })]
+    [Parameter(Mandatory = $false, Position = 0)]
     [string]$HostFile,
 
     [Parameter(Mandatory = $false)]
@@ -59,6 +58,39 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Validate required parameter and show usage if missing
+if (-not $HostFile) {
+    Write-Host @"
+
+ESXi SSH Data Collection Script
+================================
+
+Usage: .\Collect-ESXiData.ps1 -HostFile <path> [options]
+
+Required:
+  -HostFile <path>       Path to file containing ESXi hostnames (one per line)
+
+Options:
+  -ThrottleLimit <n>     Concurrent hosts (default: 10)
+  -Timeout <seconds>     SSH command timeout (default: 30)
+  -Retries <n>           Retry attempts for failed hosts (default: 2)
+  -OutputFile <path>     Custom output CSV filename
+  -PreserveSSHState      Restore SSH to original state instead of disabling
+
+Examples:
+  .\Collect-ESXiData.ps1 -HostFile .\hosts.txt
+  .\Collect-ESXiData.ps1 -HostFile .\hosts.txt -ThrottleLimit 5 -PreserveSSHState
+
+"@ -ForegroundColor Cyan
+    exit 1
+}
+
+# Validate host file exists
+if (-not (Test-Path $HostFile -PathType Leaf)) {
+    Write-Host "ERROR: Host file not found: $HostFile" -ForegroundColor Red
+    exit 1
+}
 
 # SSH commands to execute on each host
 $SSHCommands = @(
