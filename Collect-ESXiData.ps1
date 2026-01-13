@@ -58,7 +58,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.4.0"
+$ScriptVersion = "1.4.2"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -477,11 +477,13 @@ try {
         }
 
         $viConnection = $null
+        $sshSession = $null
         $sshWasRunning = $false
         $attempt = 0
 
         while ($attempt -le $retries) {
             $attempt++
+            $sshSession = $null  # Reset for each attempt
 
             try {
                 Write-Log -Message "Processing host (attempt $attempt/$($retries + 1))" -Hostname $hostname -SyncHash $sync
@@ -539,6 +541,7 @@ try {
                     throw "SSH session failed: $_"
                 }
 
+                $sshFailed = $false
                 foreach ($cmd in $cmds) {
                     Write-Log -Message "Executing: $cmd" -Hostname $hostname -SyncHash $sync
                     try {
@@ -550,27 +553,28 @@ try {
                         $result[$cmd] = $sshResult.Output -join "`n"
                     }
                     catch {
-                        Write-Log -Message "Command failed: $cmd - $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
+                        Write-Log -Message "SSH command failed: $cmd - $_" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
+                        Write-Log -Message "Aborting remaining commands for this host" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                         $result[$cmd] = "ERROR: $_"
+                        $sshFailed = $true
+                        break  # Stop trying more commands on this host
                     }
                 }
 
-                # Close SSH session
-                if ($sshSession) {
-                    Write-Log -Message "Closing SSH session..." -Hostname $hostname -SyncHash $sync
-                    Remove-SSHSession -SSHSession $sshSession -ErrorAction SilentlyContinue | Out-Null
+                if ($sshFailed) {
+                    Write-Log -Message "SSH commands failed - host marked as failed" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
+                } else {
+                    $result.Success = $true
+                    Write-Log -Message "Successfully collected data" -Level 'SUCCESS' -Hostname $hostname -SyncHash $sync
                 }
-
-                $result.Success = $true
-                Write-Log -Message "Successfully collected data" -Level 'SUCCESS' -Hostname $hostname -SyncHash $sync
-                break
+                break  # Exit retry loop - we connected, no point retrying
             }
             catch {
                 $errorMsg = $_.Exception.Message
 
                 if ($errorMsg -match 'authentication|credential|password|login' -or $_.Exception.GetType().Name -match 'Auth') {
                     Write-Log -Message "Authentication failed: $errorMsg" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
-                    break
+                    break  # Don't retry auth failures
                 }
 
                 if ($attempt -le $retries) {
@@ -582,6 +586,13 @@ try {
                 }
             }
             finally {
+                # Always close SSH session if open
+                if ($sshSession) {
+                    Write-Log -Message "Closing SSH session..." -Hostname $hostname -SyncHash $sync
+                    Remove-SSHSession -SSHSession $sshSession -ErrorAction SilentlyContinue | Out-Null
+                    $sshSession = $null
+                }
+
                 if ($viConnection) {
                     try {
                         $vmHostCleanup = Get-VMHost -Server $viConnection -ErrorAction SilentlyContinue
