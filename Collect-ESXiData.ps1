@@ -58,7 +58,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.2.0"
+$ScriptVersion = "1.4.0"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -97,6 +97,13 @@ if (-not (Test-Path $HostFile -PathType Leaf)) {
 if (-not (Get-Module -ListAvailable -Name VMware.PowerCLI)) {
     Write-Host "ERROR: VMware.PowerCLI module is not installed." -ForegroundColor Red
     Write-Host "Install it with: Install-Module -Name VMware.PowerCLI -Scope CurrentUser" -ForegroundColor Yellow
+    exit 1
+}
+
+# Check for Posh-SSH module
+if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
+    Write-Host "ERROR: Posh-SSH module is not installed." -ForegroundColor Red
+    Write-Host "Install it with: Install-Module -Name Posh-SSH -Scope CurrentUser" -ForegroundColor Yellow
     exit 1
 }
 
@@ -379,8 +386,8 @@ try {
     Write-Log -Message "Retries: $Retries" -Level 'INFO'
     Write-Log -Message "Preserve SSH state: $PreserveSSHState" -Level 'INFO'
 
-    # Load hosts from file
-    $hosts = Get-Content -Path $HostFile | Where-Object { $_ -match '\S' } | ForEach-Object { $_.Trim() }
+    # Load hosts from file (force array to handle single-host files)
+    $hosts = @(Get-Content -Path $HostFile | Where-Object { $_ -match '\S' } | ForEach-Object { $_.Trim() })
 
     if ($hosts.Count -eq 0) {
         throw "No hosts found in $HostFile"
@@ -422,8 +429,9 @@ try {
         $sync = $using:syncHash
         $resultsBag = $using:results
 
-        # Import required module in parallel runspace
+        # Import required modules in parallel runspace
         Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
+        Import-Module Posh-SSH -ErrorAction SilentlyContinue
 
         # Define functions in parallel scope
         function Write-Log {
@@ -456,75 +464,7 @@ try {
             }
         }
 
-        function Invoke-SSHCommand {
-            param(
-                [string]$Hostname,
-                [string]$Username,
-                [string]$Command,
-                [int]$TimeoutSeconds,
-                [hashtable]$SyncHash
-            )
-
-            $sshArgs = @(
-                '-o', 'StrictHostKeyChecking=no'
-                '-o', 'UserKnownHostsFile=/dev/null'
-                '-o', 'LogLevel=ERROR'
-                '-o', "ConnectTimeout=$TimeoutSeconds"
-                "$Username@$Hostname"
-                $Command
-            )
-
-            try {
-                $processInfo = New-Object System.Diagnostics.ProcessStartInfo
-                $processInfo.FileName = 'ssh.exe'
-                $processInfo.Arguments = $sshArgs -join ' '
-                $processInfo.RedirectStandardOutput = $true
-                $processInfo.RedirectStandardError = $true
-                $processInfo.UseShellExecute = $false
-                $processInfo.CreateNoWindow = $true
-
-                $process = New-Object System.Diagnostics.Process
-                $process.StartInfo = $processInfo
-
-                $outputBuilder = [System.Text.StringBuilder]::new()
-                $errorBuilder = [System.Text.StringBuilder]::new()
-
-                $outputHandler = {
-                    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-                        [void]$Event.MessageData.AppendLine($EventArgs.Data)
-                    }
-                }
-
-                $outputEvent = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action $outputHandler -MessageData $outputBuilder
-                $errorEvent = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action $outputHandler -MessageData $errorBuilder
-
-                [void]$process.Start()
-                $process.BeginOutputReadLine()
-                $process.BeginErrorReadLine()
-
-                $completed = $process.WaitForExit($TimeoutSeconds * 1000)
-
-                Unregister-Event -SourceIdentifier $outputEvent.Name
-                Unregister-Event -SourceIdentifier $errorEvent.Name
-
-                if (-not $completed) {
-                    $process.Kill()
-                    throw "SSH command timed out after $TimeoutSeconds seconds"
-                }
-
-                $output = $outputBuilder.ToString().TrimEnd()
-                $stderr = $errorBuilder.ToString().TrimEnd()
-
-                if ($process.ExitCode -ne 0 -and -not [string]::IsNullOrEmpty($stderr)) {
-                    Write-Log -Message "SSH stderr for '$Command': $stderr" -Level 'WARN' -Hostname $Hostname -SyncHash $SyncHash
-                }
-
-                return $output
-            }
-            catch {
-                throw "SSH command failed: $_"
-            }
-        }
+        # Note: SSH session is managed at the host level, not per-command
 
         # Process the host
         $result = [ordered]@{
@@ -587,18 +527,38 @@ try {
                     Write-Log -Message "SSH service is already running, skipping start" -Hostname $hostname -SyncHash $sync
                 }
 
-                $username = $cred.UserName
+                # Create SSH session using Posh-SSH
+                Write-Log -Message "Creating SSH session via Posh-SSH..." -Hostname $hostname -SyncHash $sync
+                $sshSession = $null
+                try {
+                    $sshSession = New-SSHSession -ComputerName $hostname -Credential $cred -AcceptKey -ConnectionTimeout $timeout -ErrorAction Stop
+                    Write-Log -Message "SSH session established (SessionId: $($sshSession.SessionId))" -Hostname $hostname -SyncHash $sync
+                }
+                catch {
+                    Write-Log -Message "Failed to create SSH session: $_" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
+                    throw "SSH session failed: $_"
+                }
 
                 foreach ($cmd in $cmds) {
                     Write-Log -Message "Executing: $cmd" -Hostname $hostname -SyncHash $sync
                     try {
-                        $output = Invoke-SSHCommand -Hostname $hostname -Username $username -Command $cmd -TimeoutSeconds $timeout -SyncHash $sync
-                        $result[$cmd] = $output
+                        $sshResult = Invoke-SSHCommand -SSHSession $sshSession -Command $cmd -TimeOut $timeout -ErrorAction Stop
+                        Write-Log -Message "SSH exit code: $($sshResult.ExitStatus)" -Hostname $hostname -SyncHash $sync
+                        if ($sshResult.ExitStatus -ne 0 -and $sshResult.Error) {
+                            Write-Log -Message "SSH stderr: $($sshResult.Error)" -Level 'WARN' -Hostname $hostname -SyncHash $sync
+                        }
+                        $result[$cmd] = $sshResult.Output -join "`n"
                     }
                     catch {
                         Write-Log -Message "Command failed: $cmd - $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
                         $result[$cmd] = "ERROR: $_"
                     }
+                }
+
+                # Close SSH session
+                if ($sshSession) {
+                    Write-Log -Message "Closing SSH session..." -Hostname $hostname -SyncHash $sync
+                    Remove-SSHSession -SSHSession $sshSession -ErrorAction SilentlyContinue | Out-Null
                 }
 
                 $result.Success = $true
