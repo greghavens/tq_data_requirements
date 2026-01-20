@@ -12,27 +12,52 @@ Create a PowerShell 7+ script that collects hardware and configuration data from
 1. Connect to the ESXi host via PowerCLI (`Connect-VIServer`)
 2. Record whether SSH service is currently enabled
 3. Enable the SSH service via `Get-VMHostService` / `Start-VMHostService`
-4. Execute the following commands via the Windows built-in SSH client (`ssh.exe`):
+4. Execute SSH commands using the Posh-SSH module (`New-SSHSession` / `Invoke-SSHCommand`):
+
+### Static Commands
    - `vmware -vl`
-   - `esxcli network nic list`
-   - `lspci -v |grep -i eth`
-   - `lspci -v |grep -i net`
-   - `lspci -p |grep -i qedentv`
    - `vsish -e get /hardware/bios/dmiInfo`
    - `vsish -e get /hardware/cpu/cpuModelName`
    - `vsish -e get /hardware/cpu/cpuInfo`
+   - `vsish -e get /memory/comprehensive`
    - `esxcfg-scsidevs -a`
    - `esxcfg-scsidevs -A`
    - `esxcfg-scsidevs -c`
+   - `esxcli network nic list`
+   - `lspci -v |grep -i Ethernet -A2`
+
+### Dynamic lspci Commands (Driver Discovery)
+
+After running the static commands, parse the output to discover drivers and run additional `lspci` commands:
+
+1. **Storage Drivers**: Parse `esxcfg-scsidevs -a` output to extract driver names from the "Driver" column, then run `lspci -p |grep -i <driver>` for each unique driver found.
+
+2. **Network Drivers**: Parse `esxcli network nic list` output to extract driver names from the "Driver" column, then run `lspci -p |grep -i <driver>` for each unique driver found.
+
 5. Disable SSH service (default behavior)
 6. Disconnect from the host
 
 ## Output
 
 - Single CSV file with proper RFC 4180 quoting (handles embedded commas, newlines, quotes)
-- Column headers: `Hostname` followed by each command as its own column header (the literal command string)
-- Each row contains one host's data with full command output per cell
 - Filename auto-generated with timestamp (e.g., `esxi_inventory_20250113_143022.csv`)
+
+### Column Structure
+
+| Column | Description |
+|--------|-------------|
+| `Hostname` | The ESXi host name or IP |
+| `vmware -vl` | VMware version info |
+| `vsish -e get /hardware/bios/dmiInfo` | BIOS/DMI information |
+| `vsish -e get /hardware/cpu/cpuModelName` | CPU model name |
+| `vsish -e get /hardware/cpu/cpuInfo` | CPU details |
+| `vsish -e get /memory/comprehensive` | Memory information |
+| `esxcfg-scsidevs -a` | SCSI adapters |
+| `esxcfg-scsidevs -A` | SCSI adapter details |
+| `esxcfg-scsidevs -c` | SCSI device paths |
+| `esxcli network nic list` | Network adapters |
+| `lspci -v \|grep -i Ethernet -A2` | PCI Ethernet device details |
+| `lspci_output` | **Combined output** of all dynamic `lspci -p` commands for both storage and network drivers, with each command and its output clearly labeled |
 
 ## Logging
 

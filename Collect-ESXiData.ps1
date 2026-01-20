@@ -58,7 +58,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.4.3"
+$ScriptVersion = "1.5.0"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -107,20 +107,23 @@ if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
     exit 1
 }
 
-# SSH commands to execute on each host
+# Static SSH commands to execute on each host
 $SSHCommands = @(
     'vmware -vl'
-    'esxcli network nic list'
-    'lspci -v |grep -i eth'
-    'lspci -v |grep -i net'
-    'lspci -p |grep -i qedentv'
     'vsish -e get /hardware/bios/dmiInfo'
     'vsish -e get /hardware/cpu/cpuModelName'
     'vsish -e get /hardware/cpu/cpuInfo'
+    'vsish -e get /memory/comprehensive'
     'esxcfg-scsidevs -a'
     'esxcfg-scsidevs -A'
     'esxcfg-scsidevs -c'
+    'esxcli network nic list'
+    'lspci -v |grep -i Ethernet -A2'
 )
+
+# Commands whose output is used for driver discovery
+$StorageDriverCmd = 'esxcfg-scsidevs -a'
+$NetworkDriverCmd = 'esxcli network nic list'
 
 # Generate timestamp for filenames
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -236,6 +239,8 @@ try {
         $preserveSSH = $using:PreserveSSHState
         $sync = $using:syncHash
         $resultsBag = $using:results
+        $storageDriverCmd = $using:StorageDriverCmd
+        $networkDriverCmd = $using:NetworkDriverCmd
 
         # Import required modules in parallel runspace
         Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
@@ -283,6 +288,8 @@ try {
         foreach ($cmd in $cmds) {
             $result[$cmd] = ''
         }
+        # Add column for combined lspci driver output
+        $result['lspci_output'] = ''
 
         $viConnection = $null
         $sshSession = $null
@@ -369,6 +376,86 @@ try {
                     }
                 }
 
+                # Dynamic lspci driver discovery (only if static commands succeeded)
+                if (-not $sshFailed) {
+                    $lspciOutputParts = [System.Collections.Generic.List[string]]::new()
+                    $discoveredDrivers = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+                    # Parse storage drivers from esxcfg-scsidevs -a output
+                    # Format: vmhbaX  driver_name  link_info  device_info  uid
+                    $storageOutput = $result[$storageDriverCmd]
+                    if ($storageOutput -and $storageOutput -notmatch '^ERROR:') {
+                        $storageLines = $storageOutput -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*$' }
+                        foreach ($line in $storageLines) {
+                            # Split on whitespace, driver is typically the second column
+                            $fields = $line -split '\s+' | Where-Object { $_ }
+                            if ($fields.Count -ge 2) {
+                                $driver = $fields[1]
+                                # Skip header line or invalid entries
+                                if ($driver -and $driver -ne 'Driver' -and $driver -notmatch '^-+$') {
+                                    [void]$discoveredDrivers.Add($driver)
+                                }
+                            }
+                        }
+                        Write-Log -Message "Discovered storage drivers: $($discoveredDrivers -join ', ')" -Hostname $hostname -SyncHash $sync
+                    }
+
+                    # Parse network drivers from esxcli network nic list output
+                    # Format: Name    PCI Device    Driver    Admin Status    Link Status    Speed    Duplex    MAC Address    MTU    Description
+                    $networkOutput = $result[$networkDriverCmd]
+                    if ($networkOutput -and $networkOutput -notmatch '^ERROR:') {
+                        $networkLines = $networkOutput -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*$' }
+                        $headerFound = $false
+                        $driverColIndex = -1
+                        foreach ($line in $networkLines) {
+                            if (-not $headerFound) {
+                                # Look for header line containing "Driver"
+                                if ($line -match 'Driver') {
+                                    $headerFound = $true
+                                    # Find column index for Driver (split by two or more spaces)
+                                    $headerParts = $line -split '\s{2,}'
+                                    for ($i = 0; $i -lt $headerParts.Count; $i++) {
+                                        if ($headerParts[$i] -match 'Driver') {
+                                            $driverColIndex = $i
+                                            break
+                                        }
+                                    }
+                                }
+                                continue
+                            }
+                            # Parse data line
+                            $fields = $line -split '\s{2,}' | Where-Object { $_ }
+                            if ($fields.Count -gt $driverColIndex -and $driverColIndex -ge 0) {
+                                $driver = $fields[$driverColIndex].Trim()
+                                if ($driver -and $driver -notmatch '^-+$') {
+                                    [void]$discoveredDrivers.Add($driver)
+                                }
+                            }
+                        }
+                        Write-Log -Message "Total unique drivers (storage + network): $($discoveredDrivers -join ', ')" -Hostname $hostname -SyncHash $sync
+                    }
+
+                    # Run lspci -p for each discovered driver
+                    foreach ($driver in $discoveredDrivers) {
+                        $lspciCmd = "lspci -p |grep -i $driver"
+                        Write-Log -Message "Executing dynamic: $lspciCmd" -Hostname $hostname -SyncHash $sync
+                        try {
+                            $lspciResult = Invoke-SSHCommand -SSHSession $sshSession -Command $lspciCmd -TimeOut $timeout -ErrorAction Stop
+                            $output = $lspciResult.Output -join "`n"
+                            # Add labeled output to collection
+                            $lspciOutputParts.Add("=== $lspciCmd ===`n$output")
+                            Write-Log -Message "lspci for $driver completed (exit: $($lspciResult.ExitStatus))" -Hostname $hostname -SyncHash $sync
+                        }
+                        catch {
+                            Write-Log -Message "lspci command failed for driver $driver`: $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
+                            $lspciOutputParts.Add("=== $lspciCmd ===`nERROR: $_")
+                        }
+                    }
+
+                    # Combine all lspci outputs into single column
+                    $result['lspci_output'] = $lspciOutputParts -join "`n`n"
+                }
+
                 if ($sshFailed) {
                     Write-Log -Message "SSH commands failed - host marked as failed" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                 } else {
@@ -441,7 +528,7 @@ try {
     $allResults = $results.ToArray() | Sort-Object -Property Hostname
 
     # Build CSV with RFC 4180 compliant formatting
-    $csvHeaders = @('Hostname') + $SSHCommands
+    $csvHeaders = @('Hostname') + $SSHCommands + @('lspci_output')
     $csvLines = [System.Collections.Generic.List[string]]::new()
 
     # Add header row
@@ -454,6 +541,7 @@ try {
         foreach ($cmd in $SSHCommands) {
             $rowValues += ConvertTo-CsvField -Value $result.$cmd
         }
+        $rowValues += ConvertTo-CsvField -Value $result.lspci_output
         $csvLines.Add($rowValues -join ',')
     }
 
