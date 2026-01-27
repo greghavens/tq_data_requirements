@@ -22,6 +22,7 @@ Create a PowerShell 7+ script that collects hardware and configuration data from
    - `vsish -e get /memory/comprehensive`
    - `esxcfg-scsidevs -A`
    - `esxcfg-scsidevs -c`
+   - `esxcfg-scsidevs -l`
    - `esxcli storage core adapter list`
    - `esxcli network nic list`
    - `lspci -v |grep -i Ethernet -A2`
@@ -54,6 +55,7 @@ After running the static commands, parse the output to discover drivers and run 
 | `vsish -e get /memory/comprehensive` | Memory information |
 | `esxcfg-scsidevs -A` | SCSI adapter details |
 | `esxcfg-scsidevs -c` | SCSI device paths |
+| `esxcfg-scsidevs -l` | SCSI device listing |
 | `esxcli storage core adapter list` | Storage adapters with driver names |
 | `esxcli network nic list` | Network adapters |
 | `lspci -v \|grep -i Ethernet -A2` | PCI Ethernet device details |

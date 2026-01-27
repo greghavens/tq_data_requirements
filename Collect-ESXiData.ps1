@@ -116,6 +116,7 @@ $SSHCommands = @(
     'vsish -e get /memory/comprehensive'
     'esxcfg-scsidevs -A'
     'esxcfg-scsidevs -c'
+    'esxcfg-scsidevs -l'
     'esxcli storage core adapter list'
     'esxcli network nic list'
     'lspci -v |grep -i Ethernet -A2'
