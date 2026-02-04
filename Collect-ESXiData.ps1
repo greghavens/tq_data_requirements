@@ -278,16 +278,13 @@ try {
         Write-Log -Message "Appending to existing CSV file" -Level 'INFO'
     }
 
-    # Create thread-safe synchronized hashtable for logging, progress, and CSV writing
+    # Create thread-safe synchronized hashtable for logging and CSV writing
     $syncHash = [hashtable]::Synchronized(@{
         LogFile = $LogFile
         LogLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvFile = $OutputFile
         CsvLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvHeaders = $csvHeaders
-        ProgressLock = [System.Threading.ReaderWriterLockSlim]::new()
-        CompletedCount = 0
-        TotalHosts = $hosts.Count
     })
 
     Write-Log -Message "Starting parallel processing of hosts" -Level 'INFO'
@@ -640,21 +637,8 @@ try {
         # Write results to CSV immediately (thread-safe)
         Write-CsvRow -Result $result -SyncHash $sync -Commands $cmds
 
-        # Update progress counter (thread-safe)
-        $sync.ProgressLock.EnterWriteLock()
-        try {
-            $currentCount = $sync['CompletedCount']
-            $sync['CompletedCount'] = $currentCount + 1
-            $completedCount = $sync['CompletedCount']
-            $totalHosts = $sync['TotalHosts']
-        }
-        finally {
-            $sync.ProgressLock.ExitWriteLock()
-        }
-
-        $percentComplete = [math]::Round(($completedCount / $totalHosts) * 100, 1)
-        $remaining = $totalHosts - $completedCount
-        Write-Log -Message "Progress: $completedCount/$totalHosts hosts completed ($percentComplete%) - $remaining remaining" -Level 'INFO' -Hostname $hostname -SyncHash $sync
+        # Simple progress message - no counter needed, CSV is the source of truth
+        Write-Log -Message "Host completed and written to CSV" -Level 'SUCCESS' -Hostname $hostname -SyncHash $sync
 
     } -ThrottleLimit $ThrottleLimit
 
@@ -680,7 +664,6 @@ try {
     # Cleanup
     $syncHash.LogLock.Dispose()
     $syncHash.CsvLock.Dispose()
-    $syncHash.ProgressLock.Dispose()
 }
 catch {
     Write-Log -Message "Fatal error: $_" -Level 'ERROR'
