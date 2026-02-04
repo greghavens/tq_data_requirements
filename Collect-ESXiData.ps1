@@ -643,15 +643,18 @@ try {
         # Update progress counter (thread-safe)
         $sync.ProgressLock.EnterWriteLock()
         try {
-            $sync.CompletedCount++
-            $completedCount = $sync.CompletedCount
-            $percentComplete = [math]::Round(($completedCount / $sync.TotalHosts) * 100, 1)
-            $remaining = $sync.TotalHosts - $completedCount
+            $currentCount = $sync['CompletedCount']
+            $sync['CompletedCount'] = $currentCount + 1
+            $completedCount = $sync['CompletedCount']
+            $totalHosts = $sync['TotalHosts']
         }
         finally {
             $sync.ProgressLock.ExitWriteLock()
         }
-        Write-Log -Message "Progress: $completedCount/$($sync.TotalHosts) hosts completed ($percentComplete%) - $remaining remaining" -Level 'INFO' -Hostname $hostname -SyncHash $sync
+
+        $percentComplete = [math]::Round(($completedCount / $totalHosts) * 100, 1)
+        $remaining = $totalHosts - $completedCount
+        Write-Log -Message "Progress: $completedCount/$totalHosts hosts completed ($percentComplete%) - $remaining remaining" -Level 'INFO' -Hostname $hostname -SyncHash $sync
 
     } -ThrottleLimit $ThrottleLimit
 
