@@ -49,6 +49,12 @@ Specify custom output file and longer timeout:
 .\Collect-ESXiData.ps1 -HostFile .\hosts.txt -OutputFile inventory.csv -Timeout 60
 ```
 
+Resume a previously interrupted collection:
+```powershell
+.\Collect-ESXiData.ps1 -HostFile .\hosts.txt -OutputFile existing_inventory.csv
+# Script will detect existing file and prompt to resume
+```
+
 ## Host File Format
 
 Create a text file with one ESXi hostname or IP address per line:
@@ -106,7 +112,8 @@ All dynamic `lspci` outputs are combined into a single `lspci_output` column wit
 
 1. **Reads host list** from the specified file
 2. **Prompts for credentials** (used for all hosts)
-3. **Processes hosts in parallel** up to the throttle limit
+3. **Checks for existing output** and offers to resume if found
+4. **Processes hosts in parallel** up to the throttle limit with real-time progress updates
 4. For each host:
    - Connects via PowerCLI (`Connect-VIServer`)
    - Records current SSH service state
@@ -118,6 +125,52 @@ All dynamic `lspci` outputs are combined into a single `lspci_output` column wit
    - Restores SSH service state (based on `-PreserveSSHState`)
    - Disconnects from host
 5. **Writes results** to CSV file
+
+## Resume Functionality
+
+The script automatically detects existing output files and offers to resume interrupted collections:
+
+- **Automatic Detection**: When an output file already exists, the script prompts: `Do you want to resume and skip already-processed hosts? (Y/N)`
+- **Smart Skipping**: Parses the existing CSV to identify which hosts were already processed
+- **Progress Preservation**: Only processes the remaining hosts, saving time and avoiding duplicate SSH connections
+- **Result Merging**: Automatically combines existing results with newly collected data
+- **Complete Detection**: If all hosts are already processed, the script exits gracefully
+
+### Resume Example Workflow
+
+```powershell
+# Initial run (interrupted after processing 3 of 10 hosts)
+.\Collect-ESXiData.ps1 -HostFile .\hosts.txt
+# Output: esxi_inventory_20260204_143022.csv (3 hosts)
+
+# Resume the collection
+.\Collect-ESXiData.ps1 -HostFile .\hosts.txt -OutputFile esxi_inventory_20260204_143022.csv
+
+# Script prompts:
+# Existing output file detected: esxi_inventory_20260204_143022.csv
+# Do you want to resume and skip already-processed hosts? (Y/N)
+
+# Enter 'Y' to resume
+# Script will process only the remaining 7 hosts
+# Final output merges all 10 hosts into the CSV
+```
+
+This feature is particularly useful for:
+- Large host inventories that take a long time to process
+- Network interruptions or script crashes
+- Avoiding redundant SSH connections to already-processed hosts
+
+## Progress Tracking
+
+During execution, the script displays real-time progress:
+```
+Progress: 3/10 hosts completed (30.0%) - 7 remaining
+```
+
+This helps you monitor:
+- How many hosts have been processed
+- Percentage completion
+- How many hosts remain
 
 ## Error Handling
 

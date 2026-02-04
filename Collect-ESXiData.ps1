@@ -215,14 +215,53 @@ try {
         throw "Credentials are required"
     }
 
+    # Check for existing output file and offer resume option
+    $processedHosts = @()
+    if (Test-Path $OutputFile) {
+        Write-Host "`nExisting output file detected: $OutputFile" -ForegroundColor Yellow
+        $resume = Read-Host "Do you want to resume and skip already-processed hosts? (Y/N)"
+
+        if ($resume -eq 'Y' -or $resume -eq 'y') {
+            Write-Log -Message "Resume mode: Loading previously processed hosts from $OutputFile" -Level 'INFO'
+            try {
+                # Parse CSV to get already-processed hostnames
+                $csvContent = Import-Csv -Path $OutputFile
+                $processedHosts = @($csvContent | Select-Object -ExpandProperty Hostname)
+                Write-Log -Message "Found $($processedHosts.Count) already-processed host(s)" -Level 'INFO'
+
+                # Filter hosts list to only unprocessed hosts
+                $originalCount = $hosts.Count
+                $hosts = @($hosts | Where-Object { $_ -notin $processedHosts })
+
+                if ($hosts.Count -eq 0) {
+                    Write-Host "`nAll hosts have already been processed. Nothing to do." -ForegroundColor Green
+                    Write-Log -Message "All hosts already processed - exiting" -Level 'INFO'
+                    exit 0
+                }
+
+                Write-Log -Message "Resuming: $($hosts.Count) host(s) remaining (skipped $($originalCount - $hosts.Count))" -Level 'SUCCESS'
+            }
+            catch {
+                Write-Log -Message "Failed to parse existing CSV: $_" -Level 'WARN'
+                Write-Log -Message "Proceeding with full host list" -Level 'WARN'
+                $processedHosts = @()
+            }
+        }
+        else {
+            Write-Log -Message "Overwriting existing output file" -Level 'WARN'
+        }
+    }
+
     # Suppress PowerCLI certificate warnings
     Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false -Scope Session | Out-Null
     Set-PowerCLIConfiguration -ParticipateInCeip $false -Confirm:$false -Scope Session 2>$null | Out-Null
 
-    # Create thread-safe synchronized hashtable for logging
+    # Create thread-safe synchronized hashtable for logging and progress
     $syncHash = [hashtable]::Synchronized(@{
         LogFile = $LogFile
         LogLock = [System.Threading.ReaderWriterLockSlim]::new()
+        CompletedCount = 0
+        TotalHosts = $hosts.Count
     })
 
     # Thread-safe collection for results
@@ -537,14 +576,55 @@ try {
             }
         }
 
+        # Update progress counter (thread-safe)
+        $completedCount = [System.Threading.Interlocked]::Increment([ref]$sync.CompletedCount)
+        $percentComplete = [math]::Round(($completedCount / $sync.TotalHosts) * 100, 1)
+        $remaining = $sync.TotalHosts - $completedCount
+        Write-Log -Message "Progress: $completedCount/$($sync.TotalHosts) hosts completed ($percentComplete%) - $remaining remaining" -Level 'INFO' -Hostname $hostname -SyncHash $sync
+
         $resultsBag.Add([PSCustomObject]$result)
 
     } -ThrottleLimit $ThrottleLimit
 
     Write-Log -Message "Parallel processing complete" -Level 'INFO'
 
-    # Convert results to array and sort by hostname
-    $allResults = $results.ToArray() | Sort-Object -Property Hostname
+    # Convert results to array
+    $newResults = $results.ToArray()
+
+    # If resuming, merge with existing results
+    if ($processedHosts.Count -gt 0 -and (Test-Path $OutputFile)) {
+        Write-Log -Message "Merging new results with existing data" -Level 'INFO'
+        try {
+            # Load existing CSV data as objects
+            $existingCsv = Import-Csv -Path $OutputFile
+            $existingResults = @()
+
+            # Convert CSV rows back to result objects
+            foreach ($row in $existingCsv) {
+                $resultObj = [ordered]@{
+                    Hostname = $row.Hostname
+                    Success = $true  # Assume existing entries were successful
+                }
+                # Add all command columns
+                foreach ($cmd in $SSHCommands) {
+                    $resultObj[$cmd] = $row.$cmd
+                }
+                $resultObj['lspci_output'] = $row.lspci_output
+                $existingResults += [PSCustomObject]$resultObj
+            }
+
+            # Combine existing and new results
+            $allResults = @($existingResults + $newResults) | Sort-Object -Property Hostname
+            Write-Log -Message "Merged $($existingResults.Count) existing + $($newResults.Count) new results" -Level 'SUCCESS'
+        }
+        catch {
+            Write-Log -Message "Failed to merge with existing CSV: $_" -Level 'WARN'
+            $allResults = $newResults | Sort-Object -Property Hostname
+        }
+    }
+    else {
+        $allResults = $newResults | Sort-Object -Property Hostname
+    }
 
     # Build CSV with RFC 4180 compliant formatting
     $csvHeaders = @('Hostname') + $SSHCommands + @('lspci_output')
