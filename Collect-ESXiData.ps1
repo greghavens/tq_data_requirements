@@ -264,16 +264,30 @@ try {
     Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false -Scope Session | Out-Null
     Set-PowerCLIConfiguration -ParticipateInCeip $false -Confirm:$false -Scope Session 2>$null | Out-Null
 
-    # Create thread-safe synchronized hashtable for logging and progress
+    # Initialize CSV file with header (append mode for resume, create mode for new)
+    $csvHeaders = @('Hostname') + $SSHCommands + @('lspci_output')
+    if ($processedHosts.Count -eq 0) {
+        # New file - write header
+        $headerRow = ($csvHeaders | ForEach-Object { ConvertTo-CsvField -Value $_ }) -join ','
+        Set-Content -Path $OutputFile -Value $headerRow -NoNewline
+        Add-Content -Path $OutputFile -Value "`r`n" -NoNewline
+        Write-Log -Message "Created new CSV file with header" -Level 'INFO'
+    }
+    else {
+        # Resuming - CSV already exists with header
+        Write-Log -Message "Appending to existing CSV file" -Level 'INFO'
+    }
+
+    # Create thread-safe synchronized hashtable for logging, progress, and CSV writing
     $syncHash = [hashtable]::Synchronized(@{
         LogFile = $LogFile
         LogLock = [System.Threading.ReaderWriterLockSlim]::new()
+        CsvFile = $OutputFile
+        CsvLock = [System.Threading.ReaderWriterLockSlim]::new()
+        CsvHeaders = $csvHeaders
         CompletedCount = 0
         TotalHosts = $hosts.Count
     })
-
-    # Thread-safe collection for results
-    $results = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
     Write-Log -Message "Starting parallel processing of hosts" -Level 'INFO'
 
@@ -286,7 +300,6 @@ try {
         $retries = $using:Retries
         $preserveSSH = $using:PreserveSSHState
         $sync = $using:syncHash
-        $resultsBag = $using:results
         $storageDriverCmd = $using:StorageDriverCmd
         $networkDriverCmd = $using:NetworkDriverCmd
 
@@ -322,6 +335,45 @@ try {
                 finally {
                     $SyncHash.LogLock.ExitWriteLock()
                 }
+            }
+        }
+
+        # RFC 4180 compliant CSV field escaping
+        function ConvertTo-CsvField {
+            param([string]$Value)
+
+            if ([string]::IsNullOrEmpty($Value)) {
+                return '""'
+            }
+
+            # Check if escaping is needed (contains comma, quote, or newline)
+            if ($Value -match '[,"\r\n]') {
+                # Escape quotes by doubling them and wrap in quotes
+                return '"' + ($Value -replace '"', '""') + '"'
+            }
+            return $Value
+        }
+
+        # Thread-safe CSV row writing
+        function Write-CsvRow {
+            param(
+                [hashtable]$Result,
+                [hashtable]$SyncHash,
+                [array]$Commands
+            )
+
+            $SyncHash.CsvLock.EnterWriteLock()
+            try {
+                $rowValues = @(ConvertTo-CsvField -Value $Result.Hostname)
+                foreach ($cmd in $Commands) {
+                    $rowValues += ConvertTo-CsvField -Value $Result[$cmd]
+                }
+                $rowValues += ConvertTo-CsvField -Value $Result['lspci_output']
+                $csvRow = ($rowValues -join ',') + "`r`n"
+                Add-Content -Path $SyncHash.CsvFile -Value $csvRow -NoNewline
+            }
+            finally {
+                $SyncHash.CsvLock.ExitWriteLock()
             }
         }
 
@@ -584,85 +636,31 @@ try {
             }
         }
 
+        # Write results to CSV immediately (thread-safe)
+        Write-CsvRow -Result $result -SyncHash $sync -Commands $cmds
+
         # Update progress counter (thread-safe)
         $completedCount = [System.Threading.Interlocked]::Increment([ref]$sync.CompletedCount)
         $percentComplete = [math]::Round(($completedCount / $sync.TotalHosts) * 100, 1)
         $remaining = $sync.TotalHosts - $completedCount
         Write-Log -Message "Progress: $completedCount/$($sync.TotalHosts) hosts completed ($percentComplete%) - $remaining remaining" -Level 'INFO' -Hostname $hostname -SyncHash $sync
 
-        $resultsBag.Add([PSCustomObject]$result)
-
     } -ThrottleLimit $ThrottleLimit
 
     Write-Log -Message "Parallel processing complete" -Level 'INFO'
 
-    # Convert results to array
-    $newResults = $results.ToArray()
+    # Read CSV to generate summary (CSV was written incrementally during processing)
+    $csvData = Import-Csv -Path $OutputFile -ErrorAction SilentlyContinue
+    $totalInCsv = if ($csvData) { $csvData.Count } else { 0 }
 
-    # If resuming, merge with existing results
-    if ($processedHosts.Count -gt 0 -and (Test-Path $OutputFile)) {
-        Write-Log -Message "Merging new results with existing data" -Level 'INFO'
-        try {
-            # Load existing CSV data as objects
-            $existingCsv = Import-Csv -Path $OutputFile
-            $existingResults = @()
-
-            # Convert CSV rows back to result objects
-            foreach ($row in $existingCsv) {
-                $resultObj = [ordered]@{
-                    Hostname = $row.Hostname
-                    Success = $true  # Assume existing entries were successful
-                }
-                # Add all command columns
-                foreach ($cmd in $SSHCommands) {
-                    $resultObj[$cmd] = $row.$cmd
-                }
-                $resultObj['lspci_output'] = $row.lspci_output
-                $existingResults += [PSCustomObject]$resultObj
-            }
-
-            # Combine existing and new results
-            $allResults = @($existingResults + $newResults) | Sort-Object -Property Hostname
-            Write-Log -Message "Merged $($existingResults.Count) existing + $($newResults.Count) new results" -Level 'SUCCESS'
-        }
-        catch {
-            Write-Log -Message "Failed to merge with existing CSV: $_" -Level 'WARN'
-            $allResults = $newResults | Sort-Object -Property Hostname
-        }
-    }
-    else {
-        $allResults = $newResults | Sort-Object -Property Hostname
-    }
-
-    # Build CSV with RFC 4180 compliant formatting
-    $csvHeaders = @('Hostname') + $SSHCommands + @('lspci_output')
-    $csvLines = [System.Collections.Generic.List[string]]::new()
-
-    # Add header row
-    $headerRow = ($csvHeaders | ForEach-Object { ConvertTo-CsvField -Value $_ }) -join ','
-    $csvLines.Add($headerRow)
-
-    # Add data rows
-    foreach ($result in $allResults) {
-        $rowValues = @(ConvertTo-CsvField -Value $result.Hostname)
-        foreach ($cmd in $SSHCommands) {
-            $rowValues += ConvertTo-CsvField -Value $result.$cmd
-        }
-        $rowValues += ConvertTo-CsvField -Value $result.lspci_output
-        $csvLines.Add($rowValues -join ',')
-    }
-
-    # Write CSV file
-    $csvContent = $csvLines -join "`r`n"
-    Set-Content -Path $OutputFile -Value $csvContent -NoNewline
-
-    # Summary
-    $successCount = ($allResults | Where-Object { $_.Success }).Count
-    $failCount = $allResults.Count - $successCount
+    # Calculate based on what was expected vs what's in CSV
+    $expectedTotal = $processedHosts.Count + $hosts.Count
+    $successCount = $totalInCsv
+    $failCount = $expectedTotal - $successCount
 
     Write-Host "`n" -NoNewline
     Write-Log -Message "=== Collection Complete ===" -Level 'INFO'
-    Write-Log -Message "Total hosts: $($allResults.Count)" -Level 'INFO'
+    Write-Log -Message "Total hosts processed: $successCount of $expectedTotal" -Level 'INFO'
     Write-Log -Message "Successful: $successCount" -Level $(if ($successCount -gt 0) { 'SUCCESS' } else { 'INFO' })
     Write-Log -Message "Failed: $failCount" -Level $(if ($failCount -gt 0) { 'WARN' } else { 'INFO' })
     Write-Log -Message "Output saved to: $OutputFile" -Level 'INFO'
@@ -670,6 +668,7 @@ try {
 
     # Cleanup
     $syncHash.LogLock.Dispose()
+    $syncHash.CsvLock.Dispose()
 }
 catch {
     Write-Log -Message "Fatal error: $_" -Level 'ERROR'
