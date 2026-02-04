@@ -285,6 +285,7 @@ try {
         CsvFile = $OutputFile
         CsvLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvHeaders = $csvHeaders
+        ProgressLock = [System.Threading.ReaderWriterLockSlim]::new()
         CompletedCount = 0
         TotalHosts = $hosts.Count
     })
@@ -640,9 +641,16 @@ try {
         Write-CsvRow -Result $result -SyncHash $sync -Commands $cmds
 
         # Update progress counter (thread-safe)
-        $completedCount = [System.Threading.Interlocked]::Increment([ref]$sync.CompletedCount)
-        $percentComplete = [math]::Round(($completedCount / $sync.TotalHosts) * 100, 1)
-        $remaining = $sync.TotalHosts - $completedCount
+        $sync.ProgressLock.EnterWriteLock()
+        try {
+            $sync.CompletedCount++
+            $completedCount = $sync.CompletedCount
+            $percentComplete = [math]::Round(($completedCount / $sync.TotalHosts) * 100, 1)
+            $remaining = $sync.TotalHosts - $completedCount
+        }
+        finally {
+            $sync.ProgressLock.ExitWriteLock()
+        }
         Write-Log -Message "Progress: $completedCount/$($sync.TotalHosts) hosts completed ($percentComplete%) - $remaining remaining" -Level 'INFO' -Hostname $hostname -SyncHash $sync
 
     } -ThrottleLimit $ThrottleLimit
@@ -669,6 +677,7 @@ try {
     # Cleanup
     $syncHash.LogLock.Dispose()
     $syncHash.CsvLock.Dispose()
+    $syncHash.ProgressLock.Dispose()
 }
 catch {
     Write-Log -Message "Fatal error: $_" -Level 'ERROR'
