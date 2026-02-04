@@ -218,16 +218,23 @@ try {
     # Check for existing output file and offer resume option
     $processedHosts = @()
     if (Test-Path $OutputFile) {
-        Write-Host "`nExisting output file detected: $OutputFile" -ForegroundColor Yellow
-        $resume = Read-Host "Do you want to resume and skip already-processed hosts? (Y/N)"
+        # Validate that the file is a CSV (not a log file)
+        $fileExtension = [System.IO.Path]::GetExtension($OutputFile)
+        if ($fileExtension -ne '.csv') {
+            Write-Log -Message "Output file exists but is not a CSV file ($fileExtension). Cannot resume from this file." -Level 'WARN'
+            Write-Log -Message "To resume, specify a CSV output file with -OutputFile parameter" -Level 'WARN'
+        }
+        else {
+            Write-Host "`nExisting CSV output file detected: $OutputFile" -ForegroundColor Yellow
+            $resume = Read-Host "Do you want to resume and skip already-processed hosts? (Y/N)"
 
-        if ($resume -eq 'Y' -or $resume -eq 'y') {
-            Write-Log -Message "Resume mode: Loading previously processed hosts from $OutputFile" -Level 'INFO'
-            try {
-                # Parse CSV to get already-processed hostnames
-                $csvContent = Import-Csv -Path $OutputFile
-                $processedHosts = @($csvContent | Select-Object -ExpandProperty Hostname)
-                Write-Log -Message "Found $($processedHosts.Count) already-processed host(s)" -Level 'INFO'
+            if ($resume -eq 'Y' -or $resume -eq 'y') {
+                Write-Log -Message "Resume mode: Loading previously processed hosts from $OutputFile" -Level 'INFO'
+                try {
+                    # Parse CSV to get already-processed hostnames
+                    $csvContent = Import-Csv -Path $OutputFile
+                    $processedHosts = @($csvContent | Select-Object -ExpandProperty Hostname)
+                    Write-Log -Message "Found $($processedHosts.Count) already-processed host(s)" -Level 'INFO'
 
                 # Filter hosts list to only unprocessed hosts
                 $originalCount = $hosts.Count
@@ -240,15 +247,16 @@ try {
                 }
 
                 Write-Log -Message "Resuming: $($hosts.Count) host(s) remaining (skipped $($originalCount - $hosts.Count))" -Level 'SUCCESS'
+                }
+                catch {
+                    Write-Log -Message "Failed to parse existing CSV: $_" -Level 'WARN'
+                    Write-Log -Message "Proceeding with full host list" -Level 'WARN'
+                    $processedHosts = @()
+                }
             }
-            catch {
-                Write-Log -Message "Failed to parse existing CSV: $_" -Level 'WARN'
-                Write-Log -Message "Proceeding with full host list" -Level 'WARN'
-                $processedHosts = @()
+            else {
+                Write-Log -Message "Overwriting existing output file" -Level 'WARN'
             }
-        }
-        else {
-            Write-Log -Message "Overwriting existing output file" -Level 'WARN'
         }
     }
 
