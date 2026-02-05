@@ -278,14 +278,14 @@ try {
         Write-Log -Message "Appending to existing CSV file" -Level 'INFO'
     }
 
-    # Create thread-safe synchronized hashtable for logging and CSV writing
-    $syncHash = [hashtable]::Synchronized(@{
+    # Create hashtable for logging and CSV writing (locks provide thread safety)
+    $syncHash = @{
         LogFile = $LogFile
         LogLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvFile = $OutputFile
         CsvLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvHeaders = $csvHeaders
-    })
+    }
 
     Write-Log -Message "Starting parallel processing of hosts" -Level 'INFO'
 
