@@ -290,6 +290,13 @@ try {
     Write-Log -Message "Starting parallel processing of hosts" -Level 'INFO'
 
     # Process hosts in parallel
+    $counterTable = @{
+        count = 0
+    }
+    $syncCounter = [hashtable]::Synchronized($counterTable)
+    $updateInterval = 10
+    $totalHosts = $hosts.Count
+
     $hosts | ForEach-Object -Parallel {
         $hostname = $_
         $cred = $using:credential
@@ -300,6 +307,9 @@ try {
         $sync = $using:syncHash
         $storageDriverCmd = $using:StorageDriverCmd
         $networkDriverCmd = $using:NetworkDriverCmd
+        $localCounter = $using:syncCounter
+        $interval = $using:updateInterval
+        $totalHosts = $using:totalHosts
 
         # Import required modules in parallel runspace
         Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
@@ -373,6 +383,13 @@ try {
             finally {
                 $SyncHash.CsvLock.ExitWriteLock()
             }
+        }
+
+        $currentCount = $localCounter.Count++
+        Write-Log -Message "currentCount: $currentCount | totalHosts: $totalHosts"
+        if ($currentCount % $interval -eq 0) {
+            $percent = ($currentCount / $totalHosts) * 100
+            Write-Progress -id 1 -Activity "Collecting data..." -Status "[$currentCount of $totalhosts, $([math]::Round($percent, 2))%]" -PercentComplete $percent
         }
 
         # Note: SSH session is managed at the host level, not per-command
