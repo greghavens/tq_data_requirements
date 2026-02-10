@@ -65,7 +65,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.6.1"
+$ScriptVersion = "1.8.0"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -277,9 +277,14 @@ try {
         }
     }
 
-    # Suppress PowerCLI certificate warnings
+    # Import PowerCLI in main thread and capture context for parallel runspaces
+    # Per VMware docs (PowerCLI 12.2+), Use-PowerCLIContext is the official way to
+    # share PowerCLI state across ForEach-Object -Parallel runspaces
+    Import-Module VMware.PowerCLI -ErrorAction Stop
     Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false -Scope Session | Out-Null
     Set-PowerCLIConfiguration -ParticipateInCeip $false -Confirm:$false -Scope Session 2>$null | Out-Null
+    $powerCLIContext = Get-PowerCLIContext
+    Write-Log -Message "PowerCLI context captured for parallel runspace sharing" -Level 'INFO'
 
     # Initialize CSV file with header (append mode for resume, create mode for new)
     $csvHeaders = @('Hostname') + $SSHCommands + @('lspci_output')
@@ -331,6 +336,8 @@ try {
         $storageDriverCmd = $using:StorageDriverCmd
         if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting networkDriverCmd from using:NetworkDriverCmd" -ForegroundColor Magenta }
         $networkDriverCmd = $using:NetworkDriverCmd
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting powerCLICtx from using:powerCLIContext" -ForegroundColor Magenta }
+        $powerCLICtx = $using:powerCLIContext
         if ($debugOutput) { Write-Host "[DEBUG][$hostname] All using: variables set successfully" -ForegroundColor Magenta }
 
         # Helper: write detailed exception info when -DebugOutput is enabled
@@ -385,12 +392,16 @@ try {
         }
 
         try {
-        # Import required modules in parallel runspace
-        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Importing VMware.PowerCLI module..." -ForegroundColor Magenta }
-        Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
+        # Initialize PowerCLI context in this runspace (VMware's official parallel support since PowerCLI 12.2)
+        # This replaces Import-Module VMware.PowerCLI and avoids the thread-unsafe module cache corruption
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Calling Use-PowerCLIContext -SkipImportModuleChecks..." -ForegroundColor Magenta }
+        Use-PowerCLIContext -PowerCLIContext $powerCLICtx -SkipImportModuleChecks
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] PowerCLI context initialized successfully" -ForegroundColor Magenta }
+
+        # Posh-SSH still needs a regular import (not a PowerCLI module)
         if ($debugOutput) { Write-Host "[DEBUG][$hostname] Importing Posh-SSH module..." -ForegroundColor Magenta }
         Import-Module Posh-SSH -ErrorAction SilentlyContinue
-        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Modules imported successfully" -ForegroundColor Magenta }
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Posh-SSH imported successfully" -ForegroundColor Magenta }
 
         if ($debugOutput) { Write-Host "[DEBUG][$hostname] Defining Write-Log function..." -ForegroundColor Magenta }
         # Define functions in parallel scope
@@ -527,7 +538,8 @@ try {
             try {
                 Write-Log -Message "Processing host (attempt $attempt/$($retries + 1))" -Hostname $hostname -SyncHash $sync
 
-                Write-Log -Message "About to call Connect-VIServer for $hostname" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
+                # Connect to this ESXi host (each runspace has its own connection via Use-PowerCLIContext)
+                Write-Log -Message "Calling Connect-VIServer for $hostname" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Connecting via PowerCLI" -Hostname $hostname -SyncHash $sync
                 $viConnection = Connect-VIServer -Server $hostname -Credential $cred -ErrorAction Stop
                 Write-Log -Message "Connect-VIServer returned: $($viConnection)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
