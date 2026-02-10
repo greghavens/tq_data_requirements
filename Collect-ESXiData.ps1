@@ -58,7 +58,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.5.4"
+$ScriptVersion = "1.5.5"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -285,18 +285,15 @@ try {
         CsvFile = $OutputFile
         CsvLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvHeaders = $csvHeaders
+        CounterLock = [System.Threading.ReaderWriterLockSlim]::new()
+        ProcessedCount = 0
+        TotalHosts = $hosts.Count
+        UpdateInterval = 10
     })
 
     Write-Log -Message "Starting parallel processing of hosts" -Level 'INFO'
 
     # Process hosts in parallel
-    $counterTable = @{
-        count = 0
-    }
-    $syncCounter = [hashtable]::Synchronized($counterTable)
-    $updateInterval = 10
-    $totalHosts = $hosts.Count
-
     $hosts | ForEach-Object -Parallel {
         $hostname = $_
         $cred = $using:credential
@@ -307,10 +304,6 @@ try {
         $sync = $using:syncHash
         $storageDriverCmd = $using:StorageDriverCmd
         $networkDriverCmd = $using:NetworkDriverCmd
-        $localCounter = $using:syncCounter
-        $interval = $using:updateInterval
-        $totalHosts = $using:totalHosts
-
         # Import required modules in parallel runspace
         Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
         Import-Module Posh-SSH -ErrorAction SilentlyContinue
@@ -385,11 +378,21 @@ try {
             }
         }
 
-        $currentCount = $localCounter.Count++
+        # Thread-safe progress counter using lock (not ++ which causes enumeration errors)
+        $sync.CounterLock.EnterWriteLock()
+        try {
+            $currentCount = $sync['ProcessedCount'] + 1
+            $sync['ProcessedCount'] = $currentCount
+        }
+        finally {
+            $sync.CounterLock.ExitWriteLock()
+        }
+        $totalHosts = $sync['TotalHosts']
+        $interval = $sync['UpdateInterval']
         Write-Log -Message "currentCount: $currentCount | totalHosts: $totalHosts"
         if ($currentCount % $interval -eq 0) {
             $percent = ($currentCount / $totalHosts) * 100
-            Write-Progress -id 1 -Activity "Collecting data..." -Status "[$currentCount of $totalhosts, $([math]::Round($percent, 2))%]" -PercentComplete $percent
+            Write-Progress -Id 1 -Activity "Collecting data..." -Status "[$currentCount of $totalHosts, $([math]::Round($percent, 2))%]" -PercentComplete $percent
         }
 
         # Note: SSH session is managed at the host level, not per-command
@@ -681,6 +684,7 @@ try {
     # Cleanup
     $syncHash.LogLock.Dispose()
     $syncHash.CsvLock.Dispose()
+    $syncHash.CounterLock.Dispose()
 }
 catch {
     Write-Log -Message "Fatal error: $_" -Level 'ERROR'
