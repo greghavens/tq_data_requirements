@@ -58,7 +58,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.5.3"
+$ScriptVersion = "1.5.4"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -278,15 +278,14 @@ try {
         Write-Log -Message "Appending to existing CSV file" -Level 'INFO'
     }
 
-    # Create hashtable for logging and CSV writing (locks provide thread safety)
-    $syncHash = @{
+    # Create thread-safe synchronized hashtable for logging and CSV writing
+    $syncHash = [hashtable]::Synchronized(@{
         LogFile = $LogFile
         LogLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvFile = $OutputFile
         CsvLock = [System.Threading.ReaderWriterLockSlim]::new()
         CsvHeaders = $csvHeaders
-        ConnectLock = [System.Threading.ReaderWriterLockSlim]::new()
-    }
+    })
 
     Write-Log -Message "Starting parallel processing of hosts" -Level 'INFO'
 
@@ -313,14 +312,7 @@ try {
         $totalHosts = $using:totalHosts
 
         # Import required modules in parallel runspace
-        # PowerCLI module import must be serialized (shared static state)
-        $sync.ConnectLock.EnterWriteLock()
-        try {
-            Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
-        }
-        finally {
-            $sync.ConnectLock.ExitWriteLock()
-        }
+        Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
         Import-Module Posh-SSH -ErrorAction SilentlyContinue
 
         # Define functions in parallel scope
@@ -426,52 +418,45 @@ try {
             try {
                 Write-Log -Message "Processing host (attempt $attempt/$($retries + 1))" -Hostname $hostname -SyncHash $sync
 
-                # Serialize all PowerCLI operations (not thread-safe due to shared static state)
-                $sync.ConnectLock.EnterWriteLock()
-                try {
-                    Write-Log -Message "Connecting via PowerCLI" -Hostname $hostname -SyncHash $sync
-                    $viConnection = Connect-VIServer -Server $hostname -Credential $cred -ErrorAction Stop
-                    Write-Log -Message "Connected successfully to VI server" -Hostname $hostname -SyncHash $sync
+                Write-Log -Message "Connecting via PowerCLI" -Hostname $hostname -SyncHash $sync
+                $viConnection = Connect-VIServer -Server $hostname -Credential $cred -ErrorAction Stop
+                Write-Log -Message "Connected successfully to VI server" -Hostname $hostname -SyncHash $sync
 
-                    # Get the VMHost object (required for Get-VMHostService)
-                    Write-Log -Message "Getting VMHost object..." -Hostname $hostname -SyncHash $sync
-                    $vmHost = Get-VMHost -Server $viConnection
-                    Write-Log -Message "VMHost: $($vmHost.Name), ConnectionState: $($vmHost.ConnectionState), PowerState: $($vmHost.PowerState)" -Hostname $hostname -SyncHash $sync
+                # Get the VMHost object (required for Get-VMHostService)
+                Write-Log -Message "Getting VMHost object..." -Hostname $hostname -SyncHash $sync
+                $vmHost = Get-VMHost -Server $viConnection
+                Write-Log -Message "VMHost: $($vmHost.Name), ConnectionState: $($vmHost.ConnectionState), PowerState: $($vmHost.PowerState)" -Hostname $hostname -SyncHash $sync
 
-                    # Get all services and find SSH
-                    Write-Log -Message "Getting VMHost services..." -Hostname $hostname -SyncHash $sync
-                    $allServices = Get-VMHostService -VMHost $vmHost
-                    Write-Log -Message "Found $($allServices.Count) services" -Hostname $hostname -SyncHash $sync
+                # Get all services and find SSH
+                Write-Log -Message "Getting VMHost services..." -Hostname $hostname -SyncHash $sync
+                $allServices = Get-VMHostService -VMHost $vmHost
+                Write-Log -Message "Found $($allServices.Count) services" -Hostname $hostname -SyncHash $sync
 
-                    $sshService = $allServices | Where-Object { $_.Key -eq 'TSM-SSH' }
-                    if (-not $sshService) {
-                        Write-Log -Message "ERROR: TSM-SSH service not found! Available services: $($allServices.Key -join ', ')" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
-                        throw "TSM-SSH service not found on host"
-                    }
-
-                    Write-Log -Message "SSH Service details - Key: $($sshService.Key), Label: $($sshService.Label), Running: $($sshService.Running), Policy: $($sshService.Policy)" -Hostname $hostname -SyncHash $sync
-
-                    $sshWasRunning = [bool]$sshService.Running
-                    Write-Log -Message "SSH service Running property value: '$($sshService.Running)' (type: $($sshService.Running.GetType().Name)), evaluated as: $sshWasRunning" -Hostname $hostname -SyncHash $sync
-
-                    if (-not $sshWasRunning) {
-                        Write-Log -Message "Starting SSH service..." -Hostname $hostname -SyncHash $sync
-                        $startResult = Start-VMHostService -HostService $sshService -Confirm:$false
-                        Write-Log -Message "Start-VMHostService returned: Running=$($startResult.Running)" -Hostname $hostname -SyncHash $sync
-                        Start-Sleep -Seconds 3
-
-                        # Verify SSH actually started
-                        $sshServiceAfter = Get-VMHostService -VMHost $vmHost | Where-Object { $_.Key -eq 'TSM-SSH' }
-                        Write-Log -Message "After start - SSH Running: $($sshServiceAfter.Running)" -Hostname $hostname -SyncHash $sync
-                        if (-not $sshServiceAfter.Running) {
-                            Write-Log -Message "WARNING: SSH service may not have started properly!" -Level 'WARN' -Hostname $hostname -SyncHash $sync
-                        }
-                    } else {
-                        Write-Log -Message "SSH service is already running, skipping start" -Hostname $hostname -SyncHash $sync
-                    }
+                $sshService = $allServices | Where-Object { $_.Key -eq 'TSM-SSH' }
+                if (-not $sshService) {
+                    Write-Log -Message "ERROR: TSM-SSH service not found! Available services: $($allServices.Key -join ', ')" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
+                    throw "TSM-SSH service not found on host"
                 }
-                finally {
-                    $sync.ConnectLock.ExitWriteLock()
+
+                Write-Log -Message "SSH Service details - Key: $($sshService.Key), Label: $($sshService.Label), Running: $($sshService.Running), Policy: $($sshService.Policy)" -Hostname $hostname -SyncHash $sync
+
+                $sshWasRunning = [bool]$sshService.Running
+                Write-Log -Message "SSH service Running property value: '$($sshService.Running)' (type: $($sshService.Running.GetType().Name)), evaluated as: $sshWasRunning" -Hostname $hostname -SyncHash $sync
+
+                if (-not $sshWasRunning) {
+                    Write-Log -Message "Starting SSH service..." -Hostname $hostname -SyncHash $sync
+                    $startResult = Start-VMHostService -HostService $sshService -Confirm:$false
+                    Write-Log -Message "Start-VMHostService returned: Running=$($startResult.Running)" -Hostname $hostname -SyncHash $sync
+                    Start-Sleep -Seconds 3
+
+                    # Verify SSH actually started
+                    $sshServiceAfter = Get-VMHostService -VMHost $vmHost | Where-Object { $_.Key -eq 'TSM-SSH' }
+                    Write-Log -Message "After start - SSH Running: $($sshServiceAfter.Running)" -Hostname $hostname -SyncHash $sync
+                    if (-not $sshServiceAfter.Running) {
+                        Write-Log -Message "WARNING: SSH service may not have started properly!" -Level 'WARN' -Hostname $hostname -SyncHash $sync
+                    }
+                } else {
+                    Write-Log -Message "SSH service is already running, skipping start" -Hostname $hostname -SyncHash $sync
                 }
 
                 # Create SSH session using Posh-SSH
@@ -637,36 +622,30 @@ try {
                 }
 
                 if ($viConnection) {
-                    $sync.ConnectLock.EnterWriteLock()
                     try {
-                        try {
-                            $vmHostCleanup = Get-VMHost -Server $viConnection -ErrorAction SilentlyContinue
-                            if ($vmHostCleanup) {
-                                $sshServiceCleanup = Get-VMHostService -VMHost $vmHostCleanup | Where-Object { $_.Key -eq 'TSM-SSH' }
+                        $vmHostCleanup = Get-VMHost -Server $viConnection -ErrorAction SilentlyContinue
+                        if ($vmHostCleanup) {
+                            $sshServiceCleanup = Get-VMHostService -VMHost $vmHostCleanup | Where-Object { $_.Key -eq 'TSM-SSH' }
 
-                                if ($preserveSSH -and -not $sshWasRunning) {
-                                    Write-Log -Message "Restoring SSH to original state (stopping)" -Hostname $hostname -SyncHash $sync
-                                    Stop-VMHostService -HostService $sshServiceCleanup -Confirm:$false | Out-Null
-                                }
-                                elseif (-not $preserveSSH) {
-                                    Write-Log -Message "Stopping SSH service (default behavior)" -Hostname $hostname -SyncHash $sync
-                                    Stop-VMHostService -HostService $sshServiceCleanup -Confirm:$false | Out-Null
-                                }
+                            if ($preserveSSH -and -not $sshWasRunning) {
+                                Write-Log -Message "Restoring SSH to original state (stopping)" -Hostname $hostname -SyncHash $sync
+                                Stop-VMHostService -HostService $sshServiceCleanup -Confirm:$false | Out-Null
+                            }
+                            elseif (-not $preserveSSH) {
+                                Write-Log -Message "Stopping SSH service (default behavior)" -Hostname $hostname -SyncHash $sync
+                                Stop-VMHostService -HostService $sshServiceCleanup -Confirm:$false | Out-Null
                             }
                         }
-                        catch {
-                            Write-Log -Message "Failed to manage SSH service: $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
-                        }
-
-                        try {
-                            Disconnect-VIServer -Server $viConnection -Confirm:$false | Out-Null
-                        }
-                        catch {
-                            Write-Log -Message "Failed to disconnect: $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
-                        }
                     }
-                    finally {
-                        $sync.ConnectLock.ExitWriteLock()
+                    catch {
+                        Write-Log -Message "Failed to manage SSH service: $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
+                    }
+
+                    try {
+                        Disconnect-VIServer -Server $viConnection -Confirm:$false | Out-Null
+                    }
+                    catch {
+                        Write-Log -Message "Failed to disconnect: $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
                     }
                 }
             }
@@ -702,7 +681,6 @@ try {
     # Cleanup
     $syncHash.LogLock.Dispose()
     $syncHash.CsvLock.Dispose()
-    $syncHash.ConnectLock.Dispose()
 }
 catch {
     Write-Log -Message "Fatal error: $_" -Level 'ERROR'
