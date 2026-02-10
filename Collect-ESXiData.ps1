@@ -24,6 +24,10 @@
 .PARAMETER PreserveSSHState
     If set, restore SSH to its original state instead of always disabling.
 
+.PARAMETER DebugOutput
+    If set, enables detailed diagnostic output including full exception types,
+    inner exceptions, stack traces, and variable state at point of failure.
+
 .EXAMPLE
     .\Collect-ESXiData.ps1 -HostFile .\hosts.txt
     .\Collect-ESXiData.ps1 -HostFile .\hosts.txt -ThrottleLimit 5 -PreserveSSHState
@@ -52,13 +56,16 @@ param(
     [string]$OutputFile,
 
     [Parameter(Mandatory = $false)]
-    [switch]$PreserveSSHState
+    [switch]$PreserveSSHState,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DebugOutput
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.5.5"
+$ScriptVersion = "1.6.0"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -78,10 +85,12 @@ Options:
   -Retries <n>           Retry attempts for failed hosts (default: 2)
   -OutputFile <path>     Custom output CSV filename
   -PreserveSSHState      Restore SSH to original state instead of disabling
+  -DebugOutput           Enable detailed diagnostic output for troubleshooting
 
 Examples:
   .\Collect-ESXiData.ps1 -HostFile .\hosts.txt
   .\Collect-ESXiData.ps1 -HostFile .\hosts.txt -ThrottleLimit 5 -PreserveSSHState
+  .\Collect-ESXiData.ps1 -HostFile .\hosts.txt -DebugOutput
 
 "@ -ForegroundColor Cyan
     exit 1
@@ -190,6 +199,10 @@ function ConvertTo-CsvField {
 # Main execution
 try {
     Write-Log -Message "=== ESXi Data Collection Started ===" -Level 'INFO'
+    if ($DebugOutput) {
+        Write-Host "[DEBUG] Debug output ENABLED - detailed exception info will be shown" -ForegroundColor Magenta
+        Write-Log -Message "Debug output enabled" -Level 'INFO'
+    }
     Write-Log -Message "Host file: $HostFile" -Level 'INFO'
     Write-Log -Message "Output file: $OutputFile" -Level 'INFO'
     Write-Log -Message "Log file: $LogFile" -Level 'INFO'
@@ -304,9 +317,66 @@ try {
         $sync = $using:syncHash
         $storageDriverCmd = $using:StorageDriverCmd
         $networkDriverCmd = $using:NetworkDriverCmd
+        $debugOutput = $using:DebugOutput
+
+        # Helper: write detailed exception info when -DebugOutput is enabled
+        function Write-DebugException {
+            param(
+                [System.Management.Automation.ErrorRecord]$ErrorRecord,
+                [string]$Context = '',
+                [hashtable]$SyncHash = $null,
+                [string]$Hostname = ''
+            )
+            $ex = $ErrorRecord.Exception
+            $lines = @(
+                "===== DEBUG EXCEPTION DETAIL ====="
+                "Context: $Context"
+                "ErrorRecord: $($ErrorRecord.ToString())"
+                "Exception Type: $($ex.GetType().FullName)"
+                "Exception Message: $($ex.Message)"
+                "Exception Source: $($ex.Source)"
+                "Target Object: $($ErrorRecord.TargetObject)"
+                "Category: $($ErrorRecord.CategoryInfo)"
+                "Fully Qualified Error ID: $($ErrorRecord.FullyQualifiedErrorId)"
+                "Script Stack Trace: $($ErrorRecord.ScriptStackTrace)"
+                "Exception Stack Trace: $($ex.StackTrace)"
+            )
+            # Walk inner exceptions
+            $inner = $ex.InnerException
+            $depth = 1
+            while ($inner) {
+                $lines += "--- Inner Exception (depth $depth) ---"
+                $lines += "  Type: $($inner.GetType().FullName)"
+                $lines += "  Message: $($inner.Message)"
+                $lines += "  Stack Trace: $($inner.StackTrace)"
+                $inner = $inner.InnerException
+                $depth++
+            }
+            $lines += "===== END DEBUG EXCEPTION DETAIL ====="
+            $debugMsg = $lines -join "`n"
+            Write-Host $debugMsg -ForegroundColor Magenta
+            if ($SyncHash) {
+                try {
+                    $SyncHash['LogLock'].EnterWriteLock()
+                    try {
+                        Add-Content -Path $SyncHash['LogFile'] -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] [$Hostname] $debugMsg"
+                    }
+                    finally {
+                        $SyncHash['LogLock'].ExitWriteLock()
+                    }
+                } catch {
+                    Write-Host "WARNING: Could not write debug info to log file: $_" -ForegroundColor Yellow
+                }
+            }
+        }
+
+        try {
         # Import required modules in parallel runspace
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Importing VMware.PowerCLI module..." -ForegroundColor Magenta }
         Import-Module VMware.PowerCLI -ErrorAction SilentlyContinue
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Importing Posh-SSH module..." -ForegroundColor Magenta }
         Import-Module Posh-SSH -ErrorAction SilentlyContinue
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Modules imported successfully" -ForegroundColor Magenta }
 
         # Define functions in parallel scope
         function Write-Log {
@@ -329,12 +399,12 @@ try {
             }
 
             if ($SyncHash) {
-                $SyncHash.LogLock.EnterWriteLock()
+                $SyncHash['LogLock'].EnterWriteLock()
                 try {
-                    Add-Content -Path $SyncHash.LogFile -Value $logEntry
+                    Add-Content -Path $SyncHash['LogFile'] -Value $logEntry
                 }
                 finally {
-                    $SyncHash.LogLock.ExitWriteLock()
+                    $SyncHash['LogLock'].ExitWriteLock()
                 }
             }
         }
@@ -363,7 +433,7 @@ try {
                 [array]$Commands
             )
 
-            $SyncHash.CsvLock.EnterWriteLock()
+            $SyncHash['CsvLock'].EnterWriteLock()
             try {
                 $rowValues = @(ConvertTo-CsvField -Value $Result.Hostname)
                 foreach ($cmd in $Commands) {
@@ -371,25 +441,26 @@ try {
                 }
                 $rowValues += ConvertTo-CsvField -Value $Result['lspci_output']
                 $csvRow = ($rowValues -join ',') + "`r`n"
-                Add-Content -Path $SyncHash.CsvFile -Value $csvRow -NoNewline
+                Add-Content -Path $SyncHash['CsvFile'] -Value $csvRow -NoNewline
             }
             finally {
-                $SyncHash.CsvLock.ExitWriteLock()
+                $SyncHash['CsvLock'].ExitWriteLock()
             }
         }
 
-        # Thread-safe progress counter using lock (not ++ which causes enumeration errors)
-        $sync.CounterLock.EnterWriteLock()
+        # Thread-safe progress counter using lock
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Accessing sync hashtable for counter lock..." -ForegroundColor Magenta }
+        $sync['CounterLock'].EnterWriteLock()
         try {
             $currentCount = $sync['ProcessedCount'] + 1
             $sync['ProcessedCount'] = $currentCount
         }
         finally {
-            $sync.CounterLock.ExitWriteLock()
+            $sync['CounterLock'].ExitWriteLock()
         }
         $totalHosts = $sync['TotalHosts']
         $interval = $sync['UpdateInterval']
-        Write-Log -Message "currentCount: $currentCount | totalHosts: $totalHosts"
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Counter: $currentCount / $totalHosts" -ForegroundColor Magenta }
         if ($currentCount % $interval -eq 0) {
             $percent = ($currentCount / $totalHosts) * 100
             Write-Progress -Id 1 -Activity "Collecting data..." -Status "[$currentCount of $totalHosts, $([math]::Round($percent, 2))%]" -PercentComplete $percent
@@ -655,10 +726,45 @@ try {
         }
 
         # Write results to CSV immediately (thread-safe)
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Writing results to CSV..." -ForegroundColor Magenta }
         Write-CsvRow -Result $result -SyncHash $sync -Commands $cmds
 
         # Simple progress message - no counter needed, CSV is the source of truth
         Write-Log -Message "Host completed and written to CSV" -Level 'SUCCESS' -Hostname $hostname -SyncHash $sync
+
+        } # end outer try
+        catch {
+            # This catches ANY unhandled error in the entire parallel scriptblock
+            Write-Host "[$hostname] UNHANDLED PARALLEL ERROR: $_" -ForegroundColor Red
+            Write-Host "[$hostname] ScriptStackTrace: $($_.ScriptStackTrace)" -ForegroundColor Red
+            if ($debugOutput) {
+                Write-DebugException -ErrorRecord $_ -Context "Unhandled error in parallel scriptblock for $hostname" -SyncHash $sync -Hostname $hostname
+            }
+            # Still try to log it
+            try {
+                $sync['LogLock'].EnterWriteLock()
+                try {
+                    Add-Content -Path $sync['LogFile'] -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] [$hostname] UNHANDLED PARALLEL ERROR: $_"
+                    Add-Content -Path $sync['LogFile'] -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] [$hostname] ScriptStackTrace: $($_.ScriptStackTrace)"
+                    if ($debugOutput) {
+                        Add-Content -Path $sync['LogFile'] -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] [$hostname] Exception Type: $($_.Exception.GetType().FullName)"
+                        Add-Content -Path $sync['LogFile'] -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] [$hostname] Exception StackTrace: $($_.Exception.StackTrace)"
+                        $inner = $_.Exception.InnerException
+                        $depth = 1
+                        while ($inner) {
+                            Add-Content -Path $sync['LogFile'] -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] [$hostname] Inner Exception ($depth): $($inner.GetType().FullName): $($inner.Message)"
+                            $inner = $inner.InnerException
+                            $depth++
+                        }
+                    }
+                }
+                finally {
+                    $sync['LogLock'].ExitWriteLock()
+                }
+            } catch {
+                Write-Host "[$hostname] WARNING: Could not write error to log file: $_" -ForegroundColor Yellow
+            }
+        }
 
     } -ThrottleLimit $ThrottleLimit
 
@@ -682,12 +788,34 @@ try {
     Write-Log -Message "Log saved to: $LogFile" -Level 'INFO'
 
     # Cleanup
-    $syncHash.LogLock.Dispose()
-    $syncHash.CsvLock.Dispose()
-    $syncHash.CounterLock.Dispose()
+    $syncHash['LogLock'].Dispose()
+    $syncHash['CsvLock'].Dispose()
+    $syncHash['CounterLock'].Dispose()
 }
 catch {
     Write-Log -Message "Fatal error: $_" -Level 'ERROR'
-    Write-Log -Message $_.ScriptStackTrace -Level 'ERROR'
+    Write-Log -Message "ScriptStackTrace: $($_.ScriptStackTrace)" -Level 'ERROR'
+    if ($DebugOutput) {
+        Write-Host "`n===== FATAL ERROR DEBUG DETAIL =====" -ForegroundColor Magenta
+        Write-Host "Exception Type: $($_.Exception.GetType().FullName)" -ForegroundColor Magenta
+        Write-Host "Exception Message: $($_.Exception.Message)" -ForegroundColor Magenta
+        Write-Host "Exception Source: $($_.Exception.Source)" -ForegroundColor Magenta
+        Write-Host "Target Object: $($_.TargetObject)" -ForegroundColor Magenta
+        Write-Host "Category Info: $($_.CategoryInfo)" -ForegroundColor Magenta
+        Write-Host "Fully Qualified Error ID: $($_.FullyQualifiedErrorId)" -ForegroundColor Magenta
+        Write-Host "Script Stack Trace: $($_.ScriptStackTrace)" -ForegroundColor Magenta
+        Write-Host "Exception Stack Trace: $($_.Exception.StackTrace)" -ForegroundColor Magenta
+        $inner = $_.Exception.InnerException
+        $depth = 1
+        while ($inner) {
+            Write-Host "--- Inner Exception (depth $depth) ---" -ForegroundColor Magenta
+            Write-Host "  Type: $($inner.GetType().FullName)" -ForegroundColor Magenta
+            Write-Host "  Message: $($inner.Message)" -ForegroundColor Magenta
+            Write-Host "  Stack Trace: $($inner.StackTrace)" -ForegroundColor Magenta
+            $inner = $inner.InnerException
+            $depth++
+        }
+        Write-Host "===== END FATAL ERROR DEBUG DETAIL =====" -ForegroundColor Magenta
+    }
     exit 1
 }
