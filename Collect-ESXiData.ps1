@@ -153,6 +153,9 @@ function Write-Log {
         [hashtable]$SyncHash = $null
     )
 
+    # Skip DEBUG messages unless DebugOutput is enabled
+    if ($Level -eq 'DEBUG' -and -not $script:DebugOutput) { return }
+
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $hostPrefix = if ($Hostname) { "[$Hostname] " } else { '' }
     $logEntry = "[$timestamp] [$Level] $hostPrefix$Message"
@@ -162,6 +165,7 @@ function Write-Log {
         'ERROR' { Write-Host $logEntry -ForegroundColor Red }
         'WARN'  { Write-Host $logEntry -ForegroundColor Yellow }
         'SUCCESS' { Write-Host $logEntry -ForegroundColor Green }
+        'DEBUG' { Write-Host $logEntry -ForegroundColor Magenta }
         default { Write-Host $logEntry }
     }
 
@@ -309,15 +313,25 @@ try {
     # Process hosts in parallel
     $hosts | ForEach-Object -Parallel {
         $hostname = $_
-        $cred = $using:credential
-        $cmds = $using:SSHCommands
-        $timeout = $using:Timeout
-        $retries = $using:Retries
-        $preserveSSH = $using:PreserveSSHState
-        $sync = $using:syncHash
-        $storageDriverCmd = $using:StorageDriverCmd
-        $networkDriverCmd = $using:NetworkDriverCmd
         $debugOutput = $using:DebugOutput
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting hostname=$hostname" -ForegroundColor Magenta }
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting cred from using:credential" -ForegroundColor Magenta }
+        $cred = $using:credential
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting cmds from using:SSHCommands" -ForegroundColor Magenta }
+        $cmds = $using:SSHCommands
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting timeout from using:Timeout" -ForegroundColor Magenta }
+        $timeout = $using:Timeout
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting retries from using:Retries" -ForegroundColor Magenta }
+        $retries = $using:Retries
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting preserveSSH from using:PreserveSSHState" -ForegroundColor Magenta }
+        $preserveSSH = $using:PreserveSSHState
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting sync from using:syncHash" -ForegroundColor Magenta }
+        $sync = $using:syncHash
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting storageDriverCmd from using:StorageDriverCmd" -ForegroundColor Magenta }
+        $storageDriverCmd = $using:StorageDriverCmd
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Setting networkDriverCmd from using:NetworkDriverCmd" -ForegroundColor Magenta }
+        $networkDriverCmd = $using:NetworkDriverCmd
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] All using: variables set successfully" -ForegroundColor Magenta }
 
         # Helper: write detailed exception info when -DebugOutput is enabled
         function Write-DebugException {
@@ -378,6 +392,7 @@ try {
         Import-Module Posh-SSH -ErrorAction SilentlyContinue
         if ($debugOutput) { Write-Host "[DEBUG][$hostname] Modules imported successfully" -ForegroundColor Magenta }
 
+        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Defining Write-Log function..." -ForegroundColor Magenta }
         # Define functions in parallel scope
         function Write-Log {
             param(
@@ -387,6 +402,9 @@ try {
                 [hashtable]$SyncHash = $null
             )
 
+            # Skip DEBUG messages unless debugOutput is enabled
+            if ($Level -eq 'DEBUG' -and -not $debugOutput) { return }
+
             $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
             $hostPrefix = if ($Hostname) { "[$Hostname] " } else { '' }
             $logEntry = "[$timestamp] [$Level] $hostPrefix$Message"
@@ -395,6 +413,7 @@ try {
                 'ERROR' { Write-Host $logEntry -ForegroundColor Red }
                 'WARN'  { Write-Host $logEntry -ForegroundColor Yellow }
                 'SUCCESS' { Write-Host $logEntry -ForegroundColor Green }
+                'DEBUG' { Write-Host $logEntry -ForegroundColor Magenta }
                 default { Write-Host $logEntry }
             }
 
@@ -409,6 +428,7 @@ try {
             }
         }
 
+        Write-Log -Message "Write-Log defined. Defining ConvertTo-CsvField..." -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         # RFC 4180 compliant CSV field escaping
         function ConvertTo-CsvField {
             param([string]$Value)
@@ -425,6 +445,7 @@ try {
             return $Value
         }
 
+        Write-Log -Message "ConvertTo-CsvField defined. Defining Write-CsvRow..." -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         # Thread-safe CSV row writing
         function Write-CsvRow {
             param(
@@ -448,19 +469,27 @@ try {
             }
         }
 
+        Write-Log -Message "Write-CsvRow defined. All functions defined." -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
+
         # Thread-safe progress counter using lock
-        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Accessing sync hashtable for counter lock..." -ForegroundColor Magenta }
+        Write-Log -Message "About to access sync['CounterLock'] for EnterWriteLock" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         $sync['CounterLock'].EnterWriteLock()
+        Write-Log -Message "CounterLock acquired" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         try {
+            Write-Log -Message "Reading sync['ProcessedCount']" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
             $currentCount = $sync['ProcessedCount'] + 1
+            Write-Log -Message "Setting sync['ProcessedCount'] = $currentCount" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
             $sync['ProcessedCount'] = $currentCount
         }
         finally {
+            Write-Log -Message "Releasing CounterLock" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
             $sync['CounterLock'].ExitWriteLock()
         }
+        Write-Log -Message "Reading sync['TotalHosts']" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         $totalHosts = $sync['TotalHosts']
+        Write-Log -Message "Reading sync['UpdateInterval']" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         $interval = $sync['UpdateInterval']
-        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Counter: $currentCount / $totalHosts" -ForegroundColor Magenta }
+        Write-Log -Message "Counter: $currentCount / $totalHosts, interval=$interval" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         if ($currentCount % $interval -eq 0) {
             $percent = ($currentCount / $totalHosts) * 100
             Write-Progress -Id 1 -Activity "Collecting data..." -Status "[$currentCount of $totalHosts, $([math]::Round($percent, 2))%]" -PercentComplete $percent
@@ -469,43 +498,56 @@ try {
         # Note: SSH session is managed at the host level, not per-command
 
         # Process the host
+        Write-Log -Message "Creating result ordered hashtable" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         $result = [ordered]@{
             Hostname = $hostname
             Success = $false
         }
 
+        Write-Log -Message "Initializing result keys for $($cmds.Count) commands" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         foreach ($cmd in $cmds) {
             $result[$cmd] = ''
         }
         # Add column for combined lspci driver output
         $result['lspci_output'] = ''
+        Write-Log -Message "Result hashtable initialized with $($result.Count) keys" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
 
+        Write-Log -Message "Setting viConnection=null, sshSession=null, sshWasRunning=false, attempt=0" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         $viConnection = $null
         $sshSession = $null
         $sshWasRunning = $false
         $attempt = 0
 
+        Write-Log -Message "Entering retry while loop (retries=$retries)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         while ($attempt -le $retries) {
             $attempt++
             $sshSession = $null  # Reset for each attempt
+            Write-Log -Message "Retry loop iteration: attempt=$attempt, retries=$retries" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
 
             try {
                 Write-Log -Message "Processing host (attempt $attempt/$($retries + 1))" -Hostname $hostname -SyncHash $sync
 
+                Write-Log -Message "About to call Connect-VIServer for $hostname" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Connecting via PowerCLI" -Hostname $hostname -SyncHash $sync
                 $viConnection = Connect-VIServer -Server $hostname -Credential $cred -ErrorAction Stop
+                Write-Log -Message "Connect-VIServer returned: $($viConnection)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Connected successfully to VI server" -Hostname $hostname -SyncHash $sync
 
                 # Get the VMHost object (required for Get-VMHostService)
+                Write-Log -Message "About to call Get-VMHost" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Getting VMHost object..." -Hostname $hostname -SyncHash $sync
                 $vmHost = Get-VMHost -Server $viConnection
+                Write-Log -Message "Get-VMHost returned: Name=$($vmHost.Name), Type=$($vmHost.GetType().FullName)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "VMHost: $($vmHost.Name), ConnectionState: $($vmHost.ConnectionState), PowerState: $($vmHost.PowerState)" -Hostname $hostname -SyncHash $sync
 
                 # Get all services and find SSH
+                Write-Log -Message "About to call Get-VMHostService" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Getting VMHost services..." -Hostname $hostname -SyncHash $sync
                 $allServices = Get-VMHostService -VMHost $vmHost
+                Write-Log -Message "Get-VMHostService returned $($allServices.Count) services" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Found $($allServices.Count) services" -Hostname $hostname -SyncHash $sync
 
+                Write-Log -Message "Filtering for TSM-SSH service" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 $sshService = $allServices | Where-Object { $_.Key -eq 'TSM-SSH' }
                 if (-not $sshService) {
                     Write-Log -Message "ERROR: TSM-SSH service not found! Available services: $($allServices.Key -join ', ')" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
@@ -514,17 +556,23 @@ try {
 
                 Write-Log -Message "SSH Service details - Key: $($sshService.Key), Label: $($sshService.Label), Running: $($sshService.Running), Policy: $($sshService.Policy)" -Hostname $hostname -SyncHash $sync
 
+                Write-Log -Message "Setting sshWasRunning from sshService.Running" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 $sshWasRunning = [bool]$sshService.Running
+                Write-Log -Message "sshWasRunning=$sshWasRunning" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "SSH service Running property value: '$($sshService.Running)' (type: $($sshService.Running.GetType().Name)), evaluated as: $sshWasRunning" -Hostname $hostname -SyncHash $sync
 
                 if (-not $sshWasRunning) {
+                    Write-Log -Message "About to call Start-VMHostService" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "Starting SSH service..." -Hostname $hostname -SyncHash $sync
                     $startResult = Start-VMHostService -HostService $sshService -Confirm:$false
+                    Write-Log -Message "Start-VMHostService returned: $($startResult)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "Start-VMHostService returned: Running=$($startResult.Running)" -Hostname $hostname -SyncHash $sync
                     Start-Sleep -Seconds 3
 
                     # Verify SSH actually started
+                    Write-Log -Message "Verifying SSH started - calling Get-VMHostService again" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     $sshServiceAfter = Get-VMHostService -VMHost $vmHost | Where-Object { $_.Key -eq 'TSM-SSH' }
+                    Write-Log -Message "Post-start SSH Running=$($sshServiceAfter.Running)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "After start - SSH Running: $($sshServiceAfter.Running)" -Hostname $hostname -SyncHash $sync
                     if (-not $sshServiceAfter.Running) {
                         Write-Log -Message "WARNING: SSH service may not have started properly!" -Level 'WARN' -Hostname $hostname -SyncHash $sync
@@ -534,29 +582,38 @@ try {
                 }
 
                 # Create SSH session using Posh-SSH
+                Write-Log -Message "About to call New-SSHSession" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Creating SSH session via Posh-SSH..." -Hostname $hostname -SyncHash $sync
                 $sshSession = $null
                 try {
                     $sshSession = New-SSHSession -ComputerName $hostname -Credential $cred -AcceptKey -ConnectionTimeout $timeout -ErrorAction Stop
+                    Write-Log -Message "New-SSHSession returned: SessionId=$($sshSession.SessionId), Connected=$($sshSession.Connected)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "SSH session established (SessionId: $($sshSession.SessionId))" -Hostname $hostname -SyncHash $sync
                 }
                 catch {
+                    Write-Log -Message "New-SSHSession FAILED: $($_.Exception.GetType().FullName): $($_.Exception.Message)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "Failed to create SSH session: $_" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                     throw "SSH session failed: $_"
                 }
 
                 $sshFailed = $false
+                Write-Log -Message "Starting SSH command loop ($($cmds.Count) commands)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 foreach ($cmd in $cmds) {
+                    Write-Log -Message "About to call Invoke-SSHCommand: $cmd" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "Executing: $cmd" -Hostname $hostname -SyncHash $sync
                     try {
                         $sshResult = Invoke-SSHCommand -SSHSession $sshSession -Command $cmd -TimeOut $timeout -ErrorAction Stop
+                        Write-Log -Message "Invoke-SSHCommand returned: ExitStatus=$($sshResult.ExitStatus), OutputLines=$($sshResult.Output.Count)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                         Write-Log -Message "SSH exit code: $($sshResult.ExitStatus)" -Hostname $hostname -SyncHash $sync
                         if ($sshResult.ExitStatus -ne 0 -and $sshResult.Error) {
                             Write-Log -Message "SSH stderr: $($sshResult.Error)" -Level 'WARN' -Hostname $hostname -SyncHash $sync
                         }
+                        Write-Log -Message "Setting result['$cmd'] from SSH output" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                         $result[$cmd] = $sshResult.Output -join "`n"
+                        Write-Log -Message "result['$cmd'] set (length=$($result[$cmd].Length))" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     }
                     catch {
+                        Write-Log -Message "SSH command FAILED: $cmd - $($_.Exception.GetType().FullName): $($_.Exception.Message)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                         Write-Log -Message "SSH command failed: $cmd - $_" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                         Write-Log -Message "Aborting remaining commands for this host" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                         $result[$cmd] = "ERROR: $_"
@@ -566,13 +623,17 @@ try {
                 }
 
                 # Dynamic lspci driver discovery (only if static commands succeeded)
+                Write-Log -Message "sshFailed=$sshFailed - checking if lspci discovery should run" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 if (-not $sshFailed) {
+                    Write-Log -Message "Creating lspciOutputParts List and discoveredDrivers HashSet" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     $lspciOutputParts = [System.Collections.Generic.List[string]]::new()
                     $discoveredDrivers = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
                     # Parse storage drivers from esxcli storage core adapter list output
                     # Format: HBA Name  Driver  Link State  UID  ...  (with header row)
+                    Write-Log -Message "Reading storageOutput from result['$storageDriverCmd']" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     $storageOutput = $result[$storageDriverCmd]
+                    Write-Log -Message "storageOutput length=$($storageOutput.Length), isNull=$([string]::IsNullOrEmpty($storageOutput))" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     if ($storageOutput -and $storageOutput -notmatch '^ERROR:') {
                         $storageLines = $storageOutput -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*$' }
                         $headerFound = $false
@@ -609,7 +670,9 @@ try {
 
                     # Parse network drivers from esxcli network nic list output
                     # Format: Name    PCI Device    Driver    Admin Status    Link Status    Speed    Duplex    MAC Address    MTU    Description
+                    Write-Log -Message "Reading networkOutput from result['$networkDriverCmd']" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     $networkOutput = $result[$networkDriverCmd]
+                    Write-Log -Message "networkOutput length=$($networkOutput.Length), isNull=$([string]::IsNullOrEmpty($networkOutput))" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     if ($networkOutput -and $networkOutput -notmatch '^ERROR:') {
                         $networkLines = $networkOutput -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*$' }
                         $headerFound = $false
@@ -643,8 +706,10 @@ try {
                     }
 
                     # Run lspci -p for each discovered driver
+                    Write-Log -Message "Running lspci for $($discoveredDrivers.Count) discovered drivers" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     foreach ($driver in $discoveredDrivers) {
                         $lspciCmd = "lspci -p |grep -i $driver"
+                        Write-Log -Message "About to call Invoke-SSHCommand for lspci driver=$driver" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                         Write-Log -Message "Executing dynamic: $lspciCmd" -Hostname $hostname -SyncHash $sync
                         try {
                             $lspciResult = Invoke-SSHCommand -SSHSession $sshSession -Command $lspciCmd -TimeOut $timeout -ErrorAction Stop
@@ -660,46 +725,70 @@ try {
                     }
 
                     # Combine all lspci outputs into single column
+                    Write-Log -Message "Combining $($lspciOutputParts.Count) lspci outputs into result['lspci_output']" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     $result['lspci_output'] = $lspciOutputParts -join "`n`n"
+                    Write-Log -Message "lspci_output set (length=$($result['lspci_output'].Length))" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 }
 
+                Write-Log -Message "Checking sshFailed=$sshFailed for final status" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 if ($sshFailed) {
                     Write-Log -Message "SSH commands failed - host marked as failed" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                 } else {
+                    Write-Log -Message "Setting result.Success = true" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     $result.Success = $true
                     Write-Log -Message "Successfully collected data" -Level 'SUCCESS' -Hostname $hostname -SyncHash $sync
                 }
+                Write-Log -Message "Breaking out of retry loop (success path)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 break  # Exit retry loop - we connected, no point retrying
             }
             catch {
                 $errorMsg = $_.Exception.Message
+                Write-Log -Message "CATCH in retry loop: $($_.Exception.GetType().FullName): $errorMsg" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
+                Write-Log -Message "ScriptStackTrace: $($_.ScriptStackTrace)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
+                Write-Log -Message "Exception StackTrace: $($_.Exception.StackTrace)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
+                $innerEx = $_.Exception.InnerException
+                $d = 1
+                while ($innerEx) {
+                    Write-Log -Message "InnerException($d): $($innerEx.GetType().FullName): $($innerEx.Message)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
+                    $innerEx = $innerEx.InnerException
+                    $d++
+                }
 
                 if ($errorMsg -match 'authentication|credential|password|login' -or $_.Exception.GetType().Name -match 'Auth') {
+                    Write-Log -Message "Auth failure detected, breaking" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "Authentication failed: $errorMsg" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                     break  # Don't retry auth failures
                 }
 
                 if ($attempt -le $retries) {
+                    Write-Log -Message "Will retry (attempt=$attempt, retries=$retries)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "Attempt $attempt failed: $errorMsg. Retrying..." -Level 'WARN' -Hostname $hostname -SyncHash $sync
                     Start-Sleep -Seconds 5
                 }
                 else {
+                    Write-Log -Message "No more retries, giving up" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "All attempts failed: $errorMsg" -Level 'ERROR' -Hostname $hostname -SyncHash $sync
                 }
             }
             finally {
+                Write-Log -Message "Entering finally block" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 # Always close SSH session if open
                 if ($sshSession) {
+                    Write-Log -Message "Closing SSH session (SessionId=$($sshSession.SessionId))" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "Closing SSH session..." -Hostname $hostname -SyncHash $sync
                     Remove-SSHSession -SSHSession $sshSession -ErrorAction SilentlyContinue | Out-Null
                     $sshSession = $null
                 }
 
                 if ($viConnection) {
+                    Write-Log -Message "viConnection exists, cleaning up" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     try {
+                        Write-Log -Message "Calling Get-VMHost for cleanup" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                         $vmHostCleanup = Get-VMHost -Server $viConnection -ErrorAction SilentlyContinue
                         if ($vmHostCleanup) {
+                            Write-Log -Message "Getting SSH service for cleanup" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                             $sshServiceCleanup = Get-VMHostService -VMHost $vmHostCleanup | Where-Object { $_.Key -eq 'TSM-SSH' }
+                            Write-Log -Message "sshServiceCleanup found=$($null -ne $sshServiceCleanup), preserveSSH=$preserveSSH, sshWasRunning=$sshWasRunning" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
 
                             if ($preserveSSH -and -not $sshWasRunning) {
                                 Write-Log -Message "Restoring SSH to original state (stopping)" -Hostname $hostname -SyncHash $sync
@@ -716,9 +805,12 @@ try {
                     }
 
                     try {
+                        Write-Log -Message "Calling Disconnect-VIServer" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                         Disconnect-VIServer -Server $viConnection -Confirm:$false | Out-Null
+                        Write-Log -Message "Disconnect-VIServer completed" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     }
                     catch {
+                        Write-Log -Message "Disconnect-VIServer FAILED: $($_.Exception.GetType().FullName): $_" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                         Write-Log -Message "Failed to disconnect: $_" -Level 'WARN' -Hostname $hostname -SyncHash $sync
                     }
                 }
@@ -726,7 +818,7 @@ try {
         }
 
         # Write results to CSV immediately (thread-safe)
-        if ($debugOutput) { Write-Host "[DEBUG][$hostname] Writing results to CSV..." -ForegroundColor Magenta }
+        Write-Log -Message "Writing results to CSV" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
         Write-CsvRow -Result $result -SyncHash $sync -Commands $cmds
 
         # Simple progress message - no counter needed, CSV is the source of truth
