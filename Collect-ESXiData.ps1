@@ -555,7 +555,7 @@ try {
                 # Get all services and find SSH
                 Write-Log -Message "About to call Get-VMHostService" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Getting VMHost services..." -Hostname $hostname -SyncHash $sync
-                $allServices = Get-VMHostService -VMHost $vmHost
+                $allServices = @(Get-VMHostService -VMHost $vmHost)
                 Write-Log -Message "Get-VMHostService returned $($allServices.Count) services" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                 Write-Log -Message "Found $($allServices.Count) services" -Hostname $hostname -SyncHash $sync
 
@@ -583,7 +583,7 @@ try {
 
                     # Verify SSH actually started
                     Write-Log -Message "Verifying SSH started - calling Get-VMHostService again" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
-                    $sshServiceAfter = Get-VMHostService -VMHost $vmHost | Where-Object { $_.Key -eq 'TSM-SSH' }
+                    $sshServiceAfter = @(Get-VMHostService -VMHost $vmHost) | Where-Object { $_.Key -eq 'TSM-SSH' }
                     Write-Log -Message "Post-start SSH Running=$($sshServiceAfter.Running)" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     Write-Log -Message "After start - SSH Running: $($sshServiceAfter.Running)" -Hostname $hostname -SyncHash $sync
                     if (-not $sshServiceAfter.Running) {
@@ -799,9 +799,9 @@ try {
                         $vmHostCleanup = Get-VMHost -Server $viConnection -ErrorAction SilentlyContinue
                         if ($vmHostCleanup) {
                             Write-Log -Message "Getting SSH service for cleanup" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
-                            $sshServiceCleanup = Get-VMHostService -VMHost $vmHostCleanup | Where-Object { $_.Key -eq 'TSM-SSH' }
+                            $sshServiceCleanup = @(Get-VMHostService -VMHost $vmHostCleanup) | Where-Object { $_.Key -eq 'TSM-SSH' }
                             Write-Log -Message "sshServiceCleanup found=$($null -ne $sshServiceCleanup), preserveSSH=$preserveSSH, sshWasRunning=$sshWasRunning" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
-
+                            write-log -Message "sshServiceCleanup=$sshServiceCleanup" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                             if ($preserveSSH -and -not $sshWasRunning) {
                                 Write-Log -Message "Restoring SSH to original state (stopping)" -Hostname $hostname -SyncHash $sync
                                 Stop-VMHostService -HostService $sshServiceCleanup -Confirm:$false | Out-Null
