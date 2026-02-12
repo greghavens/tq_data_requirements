@@ -65,7 +65,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = "1.8.0"
+$ScriptVersion = "1.8.1"
 
 # Always print version at startup
 Write-Host "`nESXi SSH Data Collection Script v$ScriptVersion" -ForegroundColor Cyan
@@ -184,7 +184,7 @@ function Write-Log {
     }
 }
 
-# RFC 4180 compliant CSV field escaping
+# RFC 4180 compliant CSV field escaping - always quotes all fields for maximum safety
 function ConvertTo-CsvField {
     param([string]$Value)
 
@@ -192,12 +192,9 @@ function ConvertTo-CsvField {
         return '""'
     }
 
-    # Check if escaping is needed (contains comma, quote, or newline)
-    if ($Value -match '[,"\r\n]') {
-        # Escape quotes by doubling them and wrap in quotes
-        return '"' + ($Value -replace '"', '""') + '"'
-    }
-    return $Value
+    # Always quote every field to eliminate edge cases with undetected special chars
+    # (NUL bytes, control chars, stray CR/LF from SSH output, etc.)
+    return '"' + ($Value -replace '"', '""') + '"'
 }
 
 # Main execution
@@ -440,7 +437,7 @@ try {
         }
 
         Write-Log -Message "Write-Log defined. Defining ConvertTo-CsvField..." -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
-        # RFC 4180 compliant CSV field escaping
+        # RFC 4180 compliant CSV field escaping - always quotes all fields for maximum safety
         function ConvertTo-CsvField {
             param([string]$Value)
 
@@ -448,12 +445,8 @@ try {
                 return '""'
             }
 
-            # Check if escaping is needed (contains comma, quote, or newline)
-            if ($Value -match '[,"\r\n]') {
-                # Escape quotes by doubling them and wrap in quotes
-                return '"' + ($Value -replace '"', '""') + '"'
-            }
-            return $Value
+            # Always quote every field to eliminate edge cases with undetected special chars
+            return '"' + ($Value -replace '"', '""') + '"'
         }
 
         Write-Log -Message "ConvertTo-CsvField defined. Defining Write-CsvRow..." -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
@@ -621,7 +614,9 @@ try {
                             Write-Log -Message "SSH stderr: $($sshResult.Error)" -Level 'WARN' -Hostname $hostname -SyncHash $sync
                         }
                         Write-Log -Message "Setting result['$cmd'] from SSH output" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
-                        $result[$cmd] = $sshResult.Output -join "`n"
+                        # Sanitize SSH output: strip NUL bytes and trailing CR from each line
+                        # Posh-SSH can leave \r on line endings which creates inconsistent \r\n vs \n
+                        $result[$cmd] = (($sshResult.Output | ForEach-Object { $_ -replace "`0", '' -replace "`r$", '' }) -join "`n")
                         Write-Log -Message "result['$cmd'] set (length=$($result[$cmd].Length))" -Level 'DEBUG' -Hostname $hostname -SyncHash $sync
                     }
                     catch {
@@ -725,7 +720,7 @@ try {
                         Write-Log -Message "Executing dynamic: $lspciCmd" -Hostname $hostname -SyncHash $sync
                         try {
                             $lspciResult = Invoke-SSHCommand -SSHSession $sshSession -Command $lspciCmd -TimeOut $timeout -ErrorAction Stop
-                            $output = $lspciResult.Output -join "`n"
+                            $output = ($lspciResult.Output | ForEach-Object { $_ -replace "`0", '' -replace "`r$", '' }) -join "`n"
                             # Add labeled output to collection
                             $lspciOutputParts.Add("=== $lspciCmd ===`n$output")
                             Write-Log -Message "lspci for $driver completed (exit: $($lspciResult.ExitStatus))" -Hostname $hostname -SyncHash $sync
